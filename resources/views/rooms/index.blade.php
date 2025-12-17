@@ -115,6 +115,12 @@
             </div>
         @endif
 
+        @if(session('success'))
+            <div style="background: #4a90e2; color: white; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem;">
+                {{ session('success') }}
+            </div>
+        @endif
+
         @if($rooms->count() > 0)
             <div class="rooms-grid">
                 @foreach($rooms as $room)
@@ -131,6 +137,13 @@
                             </div>
                             <div class="room-actions">
                                 <a href="{{ route('virtual-office', $room->id) }}" class="btn btn-small">Join</a>
+                                @if($room->created_by === Auth::id())
+                                    <form method="POST" action="{{ route('rooms.destroy', $room->id) }}" style="display: inline-block;" onsubmit="return confirm('Are you sure you want to delete this room?');">
+                                        @csrf
+                                        @method('DELETE')
+                                        <button type="submit" class="btn btn-small btn-danger">Delete</button>
+                                    </form>
+                                @endif
                             </div>
                         </div>
                     </div>

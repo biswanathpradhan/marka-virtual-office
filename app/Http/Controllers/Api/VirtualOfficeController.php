@@ -91,15 +91,17 @@ class VirtualOfficeController extends Controller
                 'status' => 'online',
                 'position_x' => rand(100, 800),
                 'position_y' => rand(100, 600),
-                'audio_enabled' => Auth::user()->settings?->auto_join_audio ?? false,
-                'video_enabled' => Auth::user()->settings?->auto_join_video ?? false,
+                'audio_enabled' => Auth::user()->settings?->auto_join_audio ?? true,
+                'video_enabled' => Auth::user()->settings?->auto_join_video ?? true,
             ]
         );
 
-        // Always update status to 'online' when joining, even if presence already exists
+        // Always update status to 'online' when joining (camera OFF by default)
         $presence->update([
             'status' => 'online',
             'last_seen_at' => now(),
+            'video_enabled' => false, // Camera OFF by default
+            'audio_enabled' => true, // Audio ON by default
         ]);
 
         broadcast(new \App\Events\UserJoinedRoom($presence))->toOthers();
@@ -213,8 +215,8 @@ class VirtualOfficeController extends Controller
         }
 
         $validated = $request->validate([
-            'background_image' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:10240', // 10MB max
-            'background_image_url' => 'nullable|string|url|max:500',
+            'background_image' => 'nullable|image|mimes:jpeg,png,jpg,gif,webp|max:10240', // 10MB max
+            'background_image_url' => 'nullable|string|max:1000',
         ]);
 
         if ($request->hasFile('background_image')) {
@@ -229,8 +231,25 @@ class VirtualOfficeController extends Controller
             // Store new background
             $path = $request->file('background_image')->store('room-backgrounds', 'public');
             $room->background_image = '/storage/' . $path;
-        } elseif (isset($validated['background_image_url'])) {
-            $room->background_image = $validated['background_image_url'];
+        } elseif ($request->has('background_image_url')) {
+            $url = $request->input('background_image_url');
+            if (!empty($url)) {
+                // Validate URL format
+                if (filter_var($url, FILTER_VALIDATE_URL) || strpos($url, '/storage/') === 0) {
+                    $room->background_image = $url;
+                } else {
+                    return response()->json(['message' => 'Invalid URL format'], 422);
+                }
+            } else {
+                // Empty URL means remove background
+                if ($room->background_image && strpos($room->background_image, '/storage/') === 0) {
+                    $oldPath = str_replace('/storage/', '', $room->background_image);
+                    if (Storage::disk('public')->exists($oldPath)) {
+                        Storage::disk('public')->delete($oldPath);
+                    }
+                }
+                $room->background_image = null;
+            }
         }
 
         $room->save();

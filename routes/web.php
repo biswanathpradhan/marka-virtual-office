@@ -12,6 +12,15 @@ Route::get('/', function () {
     return redirect()->route('login');
 });
 
+// Storage link route (for serving uploaded files)
+Route::get('/storage/{path}', function ($path) {
+    $filePath = storage_path('app/public/' . $path);
+    if (file_exists($filePath)) {
+        return response()->file($filePath);
+    }
+    abort(404);
+})->where('path', '.*');
+
 // Authentication Routes
 Route::get('/login', [LoginController::class, 'showLoginForm'])->name('login');
 Route::post('/login', [LoginController::class, 'login']);
@@ -24,6 +33,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/rooms', [\App\Http\Controllers\RoomController::class, 'index'])->name('rooms.index');
     Route::get('/rooms/create', [\App\Http\Controllers\RoomController::class, 'create'])->name('rooms.create');
     Route::post('/rooms', [\App\Http\Controllers\RoomController::class, 'store'])->name('rooms.store');
+    Route::delete('/rooms/{room}', [\App\Http\Controllers\RoomController::class, 'destroy'])->name('rooms.destroy');
     
     // Redirect /virtual-office to rooms if no room ID provided
     Route::get('/virtual-office', function () {

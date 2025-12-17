@@ -18,7 +18,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/rooms/{room}', [VirtualOfficeController::class, 'show']);
         Route::post('/rooms/{room}/join', [VirtualOfficeController::class, 'join']);
         Route::post('/rooms/{room}/leave', [VirtualOfficeController::class, 'leave']);
-        Route::put('/rooms/{room}/presence', [VirtualOfficeController::class, 'updatePresence']);
+        Route::put('/rooms/{room}/presence', [VirtualOfficeController::class, 'updatePresence'])->middleware('throttle:30,1'); // Max 30 requests per minute
         Route::get('/rooms/{room}/presences', [VirtualOfficeController::class, 'getPresences']);
         Route::get('/rooms/{room}/messages', [\App\Http\Controllers\Api\ChatController::class, 'index']);
         Route::post('/rooms/{room}/messages', [\App\Http\Controllers\Api\ChatController::class, 'store']);

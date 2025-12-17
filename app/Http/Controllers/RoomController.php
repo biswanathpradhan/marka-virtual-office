@@ -44,5 +44,17 @@ class RoomController extends Controller
 
         return redirect()->route('virtual-office', $room->id);
     }
+
+    public function destroy(Room $room)
+    {
+        // Only allow creator or admin to delete
+        if ($room->created_by !== Auth::id()) {
+            return redirect()->route('rooms.index')->with('error', 'You do not have permission to delete this room.');
+        }
+
+        $room->delete();
+
+        return redirect()->route('rooms.index')->with('success', 'Room deleted successfully.');
+    }
 }
 

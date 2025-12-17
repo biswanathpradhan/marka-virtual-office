@@ -13,7 +13,13 @@ class ChatController extends Controller
 {
     public function index(Room $room)
     {
-        if (!$room->canJoin(Auth::user())) {
+        $user = Auth::user();
+        if (!$user) {
+            return response()->json(['message' => 'Unauthorized'], 401);
+        }
+
+        // Allow access if room is public or user is a participant
+        if (!$room->is_public && !$room->participants()->where('user_id', $user->id)->exists()) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
 
@@ -31,7 +37,13 @@ class ChatController extends Controller
 
     public function store(Request $request, Room $room)
     {
-        if (!$room->canJoin(Auth::user())) {
+        $user = Auth::user();
+        if (!$user) {
+            return response()->json(['message' => 'Unauthorized'], 401);
+        }
+
+        // Allow access if room is public or user is a participant
+        if (!$room->is_public && !$room->participants()->where('user_id', $user->id)->exists()) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
 

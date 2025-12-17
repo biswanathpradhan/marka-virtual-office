@@ -27,26 +27,22 @@
             </div>
         </div>
 
-        <div class="office-canvas-wrapper" ref="canvasWrapperRef" :style="{
-            backgroundImage: room?.background_image ? `url('${getImageUrl(room.background_image)}')` : 'none',
-            backgroundSize: 'cover',
-            backgroundPosition: 'center',
-            backgroundRepeat: 'no-repeat',
-            backgroundAttachment: 'fixed'
-        }">
-            <div class="zoom-controls">
-                <button @click="zoomIn" class="zoom-btn">+</button>
-                <button @click="zoomOut" class="zoom-btn">−</button>
-                <button @click="resetZoom" class="zoom-btn">⌂</button>
-            </div>
-            <div class="office-canvas" ref="canvasRef" :style="{ 
-                transform: `scale(${zoomLevel})`, 
-                transformOrigin: '0 0',
-                backgroundImage: room?.background_image ? `url('${getImageUrl(room.background_image)}')` : 'none',
-                backgroundSize: 'cover',
-                backgroundPosition: 'center',
-                backgroundRepeat: 'no-repeat'
-            }">
+        <div class="office-canvas-wrapper" ref="canvasWrapperRef" @wheel="handleWheel">
+            <div class="office-canvas" ref="canvasRef" 
+                @mousedown="handlePanStart" 
+                @mousemove="handlePanMove" 
+                @mouseup="handlePanEnd" 
+                @mouseleave="handlePanEnd"
+                :style="{ 
+                    transform: `scale(${zoomLevel}) translate(${panX}px, ${panY}px)`, 
+                    transformOrigin: '0 0',
+                    backgroundImage: room?.background_image ? `url('${getImageUrl(room.background_image)}')` : 'none',
+                    backgroundSize: '100% 100%',
+                    backgroundPosition: '0 0',
+                    backgroundRepeat: 'no-repeat',
+                    width: '4000px',
+                    height: '3000px'
+                }">
                 <div class="workspace-grid"></div>
                 
                 <!-- User Avatars -->
@@ -68,17 +64,18 @@
                     @mousedown="presence.user_id === currentUserId ? handleMouseDown($event, presence) : null"
                 >
                     <div class="avatar-circle">
-                        <!-- Show video when camera is ON -->
+                        <!-- Show video when camera is ON and stream exists -->
                         <div v-if="presence.video_enabled && videoStreams[presence.user_id]" class="video-overlay-inner">
                             <video
                                 :ref="el => setVideoRef(el, presence.user_id)"
                                 autoplay
                                 playsinline
+                                muted
                                 class="avatar-video"
                                 @loadedmetadata="updateProximityAudio"
                             ></video>
                         </div>
-                        <!-- Show avatar image when camera is OFF -->
+                        <!-- Show avatar image when camera is OFF or no video stream -->
                         <template v-else>
                             <img 
                                 v-if="presence.user?.avatar_url || presence.avatar_url" 
@@ -104,20 +101,31 @@
                     <!-- User Controls (only for current user, show on hover) -->
                     <div v-if="presence.user_id === currentUserId" class="user-controls">
                         <button 
-                            @click.stop="toggleAudio" 
-                            :class="{ active: audioEnabled }" 
-                            class="user-control-btn"
-                            title="Toggle Audio"
+                            @click.stop="toggleProximityAudio" 
+                            :class="{ active: proximityAudioEnabled }" 
+                            class="user-control-btn speaker-btn-normal"
+                            title="Proximity Speaker - Only nearby users can hear"
                         >
-                            🔊
+                            <span v-if="proximityAudioEnabled">🔊</span>
+                            <span v-else class="icon-off">🔇</span>
+                        </button>
+                        <button 
+                            @click.stop="toggleGlobalAudio" 
+                            :class="{ active: globalAudioEnabled }" 
+                            class="user-control-btn speaker-btn-bold"
+                            title="Global Speaker - All users can hear"
+                        >
+                            <span v-if="globalAudioEnabled">🔊</span>
+                            <span v-else class="icon-off">🔇</span>
                         </button>
                         <button 
                             @click.stop="toggleVideo" 
-                            :class="{ active: videoEnabled }" 
-                            class="user-control-btn"
-                            title="Toggle Video"
+                            :class="{ active: videoEnabled, off: !videoEnabled }" 
+                            class="user-control-btn video-btn"
+                            title="Toggle Camera"
                         >
-                            📹
+                            <span v-if="videoEnabled">📹</span>
+                            <span v-else class="icon-off">📷<span class="cross-mark">✕</span></span>
                         </button>
                         <button 
                             @click.stop="toggleScreenShare" 
@@ -126,13 +134,6 @@
                             title="Share Screen"
                         >
                             🖥️
-                        </button>
-                        <button 
-                            @click.stop="startVideoCall" 
-                            class="user-control-btn"
-                            title="Video Call"
-                        >
-                            📞
                         </button>
                         <button 
                             @click.stop="openInviteModal" 
@@ -254,44 +255,75 @@
             </div>
         </div>
 
-        <div v-if="showBackgroundSettings" class="settings-modal" @click.self="closeBackgroundSettings">
-            <div class="settings-content">
-                <h2>Background Settings</h2>
-                <div class="settings-section">
-                    <label>Background Image:</label>
-                    <div class="avatar-upload-section">
-                        <div v-if="backgroundImagePreview" class="background-preview">
+        <div v-if="showBackgroundSettings" class="background-modal" @click.self="closeBackgroundSettings">
+            <div class="background-modal-content">
+                <div class="background-modal-header">
+                    <h2>🎨 Background Settings</h2>
+                    <button @click="closeBackgroundSettings" class="modal-close-btn">×</button>
+                </div>
+                <div class="background-modal-body">
+                    <div class="background-preview-container">
+                        <label class="preview-label">Preview</label>
+                        <div v-if="backgroundImagePreview" class="background-preview-large">
                             <img :src="backgroundImagePreview" alt="Preview" />
+                            <div class="preview-overlay">
+                                <span class="preview-badge">New Background</span>
+                            </div>
                         </div>
-                        <div v-else-if="backgroundImageUrl" class="background-preview">
-                            <img :src="backgroundImageUrl" alt="Current" />
+                        <div v-else-if="room?.background_image" class="background-preview-large">
+                            <img :src="getImageUrl(room.background_image)" alt="Current Background" />
+                            <div class="preview-overlay">
+                                <span class="preview-badge">Current Background</span>
+                            </div>
                         </div>
-                        <div v-else class="background-preview placeholder">
-                            <span>No Background</span>
+                        <div v-else class="background-preview-large placeholder">
+                            <div class="placeholder-content">
+                                <span class="placeholder-icon">🖼️</span>
+                                <span>No Background Set</span>
+                            </div>
                         </div>
+                    </div>
+                    
+                    <div class="background-upload-section">
+                        <label class="section-label">Upload Image</label>
                         <input 
                             type="file" 
                             ref="backgroundImageInput"
                             @change="handleBackgroundImageSelect" 
                             accept="image/*" 
-                            class="file-input"
-                            style="display: none;"
+                            class="file-input-hidden"
                         />
-                        <button @click="$refs.backgroundImageInput.click()" class="btn-secondary" type="button">
-                            {{ backgroundImagePreview ? 'Change Image' : 'Upload Image' }}
+                        <button @click="backgroundImageInput?.click()" class="upload-btn" type="button">
+                            <span class="btn-icon">📤</span>
+                            {{ backgroundImagePreview ? 'Change Image' : 'Choose Image File' }}
                         </button>
-                        <button v-if="backgroundImageUrl || backgroundImagePreview" @click="backgroundImageUrl = ''; backgroundImagePreview = null; backgroundImageFile = null;" class="btn-secondary" type="button">
-                            Remove
+                        <p class="upload-hint">Supported formats: JPG, PNG, GIF, WebP (Max 10MB)</p>
+                    </div>
+                    
+                    <div class="background-url-section">
+                        <label class="section-label">Or Enter Image URL</label>
+                        <input 
+                            type="text" 
+                            v-model="backgroundImageUrl" 
+                            class="url-input" 
+                            placeholder="https://example.com/image.jpg or /storage/path/to/image.jpg"
+                        />
+                        <p class="url-hint">Enter a direct image URL or storage path</p>
+                    </div>
+                    
+                    <div v-if="backgroundImageUrl || backgroundImagePreview || room?.background_image" class="background-actions">
+                        <button @click="removeBackground" class="remove-btn" type="button">
+                            <span class="btn-icon">🗑️</span>
+                            Remove Background
                         </button>
-                        <div class="avatar-url-section" style="margin-top: 0.5rem;">
-                            <label style="font-size: 0.875rem;">Or enter URL:</label>
-                            <input type="text" v-model="backgroundImageUrl" class="settings-input" placeholder="https://..." />
-                        </div>
                     </div>
                 </div>
-                <div class="settings-actions">
-                    <button @click="saveBackground" class="btn-primary">Save Background</button>
-                    <button @click="closeBackgroundSettings" class="btn-secondary">Cancel</button>
+                <div class="background-modal-footer">
+                    <button @click="closeBackgroundSettings" class="cancel-btn">Cancel</button>
+                    <button @click="saveBackground" class="save-btn">
+                        <span class="btn-icon">💾</span>
+                        Save Background
+                    </button>
                 </div>
             </div>
         </div>
@@ -434,8 +466,10 @@ export default {
         const room = ref(null);
         const presences = ref([]);
         const currentUserId = ref(null);
-        const audioEnabled = ref(true);
-        const videoEnabled = ref(true);
+        const audioEnabled = ref(false);
+        const proximityAudioEnabled = ref(false);
+        const globalAudioEnabled = ref(false);
+        const videoEnabled = ref(false); // Camera OFF by default
         const canvasRef = ref(null);
         const canvasWrapperRef = ref(null);
         const showSettings = ref(false);
@@ -443,10 +477,13 @@ export default {
         const showChat = ref(false);
         const showBackgroundSettings = ref(false);
         const showInviteModal = ref(false);
-        const showVideoCall = ref(false);
         const loading = ref(true);
         const error = ref(null);
         const zoomLevel = ref(1);
+        const panX = ref(0);
+        const panY = ref(0);
+        const isPanning = ref(false);
+        const panStart = ref({ x: 0, y: 0 });
         const draggingUserId = ref(null);
         const currentUserProfile = ref(null);
         
@@ -711,13 +748,24 @@ export default {
                 await nextTick();
                 
                 try {
+                    // Initialize media with audio only (camera OFF by default)
+                    videoEnabled.value = false;
+                    proximityAudioEnabled.value = false;
+                    globalAudioEnabled.value = false;
+                    audioEnabled.value = false;
                     await initializeMedia();
-                    // Set local video stream for video call
+                    
+                    // Update presence to reflect camera is OFF by default and audio is OFF
+                    await updatePresence({ video_enabled: false, audio_enabled: false });
+                    
+                    // Set local video stream for video call (if enabled later)
                     if (localStream.value && localVideoRef.value) {
                         localVideoRef.value.srcObject = localStream.value;
                     }
                 } catch (mediaError) {
-
+                    // If media fails, set video_enabled to false
+                    videoEnabled.value = false;
+                    await updatePresence({ video_enabled: false });
                     // Continue even if media fails - user can enable later
                 }
                 
@@ -823,37 +871,57 @@ export default {
         };
 
         // Calculate distance between two presences
-        const calculateDistance = (presence1, presence2) => {
-            const dx = presence1.position_x - presence2.position_x;
-            const dy = presence1.position_y - presence2.position_y;
+        const calculateDistance = (x1, y1, x2, y2) => {
+            const dx = x1 - x2;
+            const dy = y1 - y2;
             return Math.sqrt(dx * dx + dy * dy);
         };
 
-        // Update audio volume based on proximity
+        // Update audio volume based on speaker mode
         const updateProximityAudio = () => {
+            if (!canvasRef.value) return;
+            
             const currentPresence = presences.value.find(p => p.user_id === currentUserId.value);
             if (!currentPresence) return;
-
-            const maxDistance = 300; // Maximum distance to hear audio
+            
+            const maxDistance = 300; // Maximum distance for proximity audio
             const minVolume = 0.1; // Minimum volume (10%)
             const maxVolume = 1.0; // Maximum volume (100%)
-
+            
             presences.value.forEach(presence => {
                 if (presence.user_id === currentUserId.value) return;
-                if (!presence.audio_enabled) return;
-
-                const peer = peers.value[presence.user_id];
-                if (!peer || !peer._pc) return;
-
-                const distance = calculateDistance(currentPresence, presence);
-                const volume = distance > maxDistance 
-                    ? 0 
-                    : maxVolume - ((distance / maxDistance) * (maxVolume - minVolume));
-
-                // Update audio volume for this peer's stream
+                
                 const audioElement = videoRefs.value[presence.user_id];
-                if (audioElement) {
+                if (!audioElement) return;
+                
+                // Check if the other user has audio enabled
+                if (!presence.audio_enabled) {
+                    audioElement.volume = 0;
+                    return;
+                }
+                
+                // Calculate distance for proximity audio
+                const distance = calculateDistance(
+                    parseFloat(currentPresence.position_x) || 0,
+                    parseFloat(currentPresence.position_y) || 0,
+                    parseFloat(presence.position_x) || 0,
+                    parseFloat(presence.position_y) || 0
+                );
+                
+                // If current user has global audio ON, everyone hears at full volume
+                if (globalAudioEnabled.value) {
+                    audioElement.volume = maxVolume;
+                } 
+                // If current user has proximity audio ON, use distance-based volume
+                else if (proximityAudioEnabled.value) {
+                    const volume = distance > maxDistance 
+                        ? 0 
+                        : maxVolume - ((distance / maxDistance) * (maxVolume - minVolume));
                     audioElement.volume = Math.max(0, Math.min(1, volume));
+                } 
+                // If both are OFF, no audio
+                else {
+                    audioElement.volume = 0;
                 }
             });
         };
@@ -1019,16 +1087,44 @@ export default {
             }
         };
 
+        let lastPresenceUpdate = 0;
+        const PRESENCE_UPDATE_THROTTLE = 2000; // Minimum 2 seconds between updates
+        
         const updatePresence = async (updates) => {
+            const now = Date.now();
+            if (now - lastPresenceUpdate < PRESENCE_UPDATE_THROTTLE) {
+                // Throttle updates to prevent rate limiting
+                return;
+            }
+            
             try {
+                lastPresenceUpdate = now;
                 await axios.put(`/api/virtual-office/rooms/${props.roomId}/presence`, updates);
-            } catch (error) {
                 
+                // Update local presence
+                const currentPresenceIndex = presences.value.findIndex(p => p.user_id === currentUserId.value);
+                if (currentPresenceIndex !== -1) {
+                    Object.assign(presences.value[currentPresenceIndex], updates);
+                }
+            } catch (error) {
+                // Handle rate limiting gracefully
+                if (error.response?.status === 429) {
+                    // Rate limited - increase throttle temporarily
+                    lastPresenceUpdate = now + 10000; // Wait 10 seconds before next update
+                }
+                // Silently fail for other errors
             }
         };
 
-        const toggleAudio = async () => {
-            audioEnabled.value = !audioEnabled.value;
+        const toggleProximityAudio = async () => {
+            // Turn off global audio if enabling proximity audio
+            if (!proximityAudioEnabled.value && globalAudioEnabled.value) {
+                globalAudioEnabled.value = false;
+            }
+            
+            proximityAudioEnabled.value = !proximityAudioEnabled.value;
+            audioEnabled.value = proximityAudioEnabled.value || globalAudioEnabled.value;
+            
             if (localStream.value) {
                 localStream.value.getAudioTracks().forEach(track => {
                     track.enabled = audioEnabled.value;
@@ -1050,11 +1146,52 @@ export default {
                 try {
                     await initializeMedia();
                 } catch (error) {
-                    
+                    console.error('Failed to initialize proximity audio:', error);
+                    proximityAudioEnabled.value = false;
                     audioEnabled.value = false;
                 }
             }
             await updatePresence({ audio_enabled: audioEnabled.value });
+            updateProximityAudio();
+        };
+
+        const toggleGlobalAudio = async () => {
+            // Turn off proximity audio if enabling global audio
+            if (!globalAudioEnabled.value && proximityAudioEnabled.value) {
+                proximityAudioEnabled.value = false;
+            }
+            
+            globalAudioEnabled.value = !globalAudioEnabled.value;
+            audioEnabled.value = proximityAudioEnabled.value || globalAudioEnabled.value;
+            
+            if (localStream.value) {
+                localStream.value.getAudioTracks().forEach(track => {
+                    track.enabled = audioEnabled.value;
+                });
+                
+                // Update all peer connections with the new audio track state
+                Object.values(peers.value).forEach(peer => {
+                    if (peer && peer._pc) {
+                        const senders = peer._pc.getSenders();
+                        senders.forEach(sender => {
+                            if (sender.track && sender.track.kind === 'audio') {
+                                sender.track.enabled = audioEnabled.value;
+                            }
+                        });
+                    }
+                });
+            } else if (audioEnabled.value) {
+                // If stream doesn't exist and we're enabling audio, get new stream
+                try {
+                    await initializeMedia();
+                } catch (error) {
+                    console.error('Failed to initialize global audio:', error);
+                    globalAudioEnabled.value = false;
+                    audioEnabled.value = false;
+                }
+            }
+            await updatePresence({ audio_enabled: audioEnabled.value });
+            updateProximityAudio();
         };
 
         const toggleVideo = async () => {
@@ -1109,38 +1246,105 @@ export default {
         };
 
         const zoomIn = () => {
-            zoomLevel.value = Math.min(zoomLevel.value + 0.1, 2);
+            const centerX = canvasWrapperRef.value.clientWidth / 2;
+            const centerY = canvasWrapperRef.value.clientHeight / 2;
+            const scale = zoomLevel.value;
+            const x = (centerX - panX.value) / scale;
+            const y = (centerY - panY.value) / scale;
+            
+            zoomLevel.value = Math.min(zoomLevel.value + 0.1, 3);
+            
+            const newScale = zoomLevel.value;
+            panX.value = centerX - x * newScale;
+            panY.value = centerY - y * newScale;
         };
 
         const zoomOut = () => {
+            const centerX = canvasWrapperRef.value.clientWidth / 2;
+            const centerY = canvasWrapperRef.value.clientHeight / 2;
+            const scale = zoomLevel.value;
+            const x = (centerX - panX.value) / scale;
+            const y = (centerY - panY.value) / scale;
+            
             zoomLevel.value = Math.max(zoomLevel.value - 0.1, 0.5);
+            
+            const newScale = zoomLevel.value;
+            panX.value = centerX - x * newScale;
+            panY.value = centerY - y * newScale;
         };
 
         const resetZoom = () => {
             zoomLevel.value = 1;
+            panX.value = 0;
+            panY.value = 0;
         };
 
         const handleWheel = (event) => {
-            // Prevent page scroll
             event.preventDefault();
             
-            // Zoom in/out with mouse wheel
-            const delta = event.deltaY;
-            const zoomFactor = 0.1;
+            // Get mouse position relative to canvas wrapper
+            const rect = canvasWrapperRef.value.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left;
+            const mouseY = event.clientY - rect.top;
             
-            if (delta < 0) {
-                // Scroll up - zoom in
-                zoomLevel.value = Math.min(zoomLevel.value + zoomFactor, 2);
-            } else {
-                // Scroll down - zoom out
-                zoomLevel.value = Math.max(zoomLevel.value - zoomFactor, 0.5);
+            // Calculate zoom factor
+            const zoomFactor = event.deltaY > 0 ? 0.9 : 1.1;
+            const newZoom = Math.max(0.5, Math.min(3, zoomLevel.value * zoomFactor));
+            
+            // Calculate the point under the mouse before zoom
+            const scale = zoomLevel.value;
+            const x = (mouseX - panX.value) / scale;
+            const y = (mouseY - panY.value) / scale;
+            
+            // Apply new zoom
+            zoomLevel.value = newZoom;
+            
+            // Adjust pan to keep the point under the mouse in the same place
+            const newScale = zoomLevel.value;
+            panX.value = mouseX - x * newScale;
+            panY.value = mouseY - y * newScale;
+        };
+
+        const handlePanStart = (event) => {
+            // Only pan if clicking on canvas or workspace grid (not on user avatar or other interactive elements)
+            const target = event.target;
+            const isInteractiveElement = target.closest('.user-avatar') || 
+                                        target.closest('.user-controls') ||
+                                        target.closest('button') ||
+                                        target.closest('input') ||
+                                        target.closest('video');
+            
+            if (!isInteractiveElement && (target === canvasRef.value || target.classList.contains('workspace-grid'))) {
+                if (event.button === 0 && !isDragging.value) { // Left mouse button and not dragging user
+                    event.preventDefault();
+                    event.stopPropagation();
+                    isPanning.value = true;
+                    panStart.value = {
+                        x: event.clientX - panX.value,
+                        y: event.clientY - panY.value
+                    };
+                }
             }
+        };
+
+        const handlePanMove = (event) => {
+            if (isPanning.value && !isDragging.value) {
+                event.preventDefault();
+                event.stopPropagation();
+                panX.value = event.clientX - panStart.value.x;
+                panY.value = event.clientY - panStart.value.y;
+            }
+        };
+
+        const handlePanEnd = () => {
+            isPanning.value = false;
         };
 
         const handleMouseDown = (event, presence) => {
             if (presence.user_id === currentUserId.value && event.button === 0) {
                 event.preventDefault();
                 event.stopPropagation();
+                isPanning.value = false; // Stop panning when dragging user
                 isDragging.value = true;
                 draggingUserId.value = presence.user_id;
                 
@@ -1149,9 +1353,10 @@ export default {
                     x: parseFloat(presence.position_x) || 0,
                     y: parseFloat(presence.position_y) || 0
                 };
+                const scale = zoomLevel.value;
                 dragStartMouse.value = {
-                    x: (event.clientX - rect.left) / zoomLevel.value,
-                    y: (event.clientY - rect.top) / zoomLevel.value
+                    x: (event.clientX - rect.left - panX.value) / scale,
+                    y: (event.clientY - rect.top - panY.value) / scale
                 };
                 
                 document.addEventListener('mousemove', handleMouseMove, { passive: false });
@@ -1165,17 +1370,18 @@ export default {
             event.preventDefault();
             
             const rect = canvasRef.value.getBoundingClientRect();
+            const scale = zoomLevel.value;
             const currentMouse = {
-                x: (event.clientX - rect.left) / zoomLevel.value,
-                y: (event.clientY - rect.top) / zoomLevel.value
+                x: (event.clientX - rect.left - panX.value) / scale,
+                y: (event.clientY - rect.top - panY.value) / scale
             };
             
             const deltaX = currentMouse.x - dragStartMouse.value.x;
             const deltaY = currentMouse.y - dragStartMouse.value.y;
             
             // Allow free movement anywhere on canvas - use fixed canvas dimensions
-            const canvasWidth = 2000; // Fixed canvas width
-            const canvasHeight = 1500; // Fixed canvas height
+            const canvasWidth = 4000; // Fixed canvas width
+            const canvasHeight = 3000; // Fixed canvas height
             const avatarSize = 100; // Approximate avatar size
             
             // Calculate new position
@@ -1369,12 +1575,48 @@ export default {
         };
 
         const openBackgroundSettings = () => {
+            if (!room.value) {
+                alert('Room not loaded yet. Please wait...');
+                return;
+            }
+            // Reset form state
             backgroundImageUrl.value = room.value?.background_image || '';
+            backgroundImagePreview.value = null;
+            backgroundImageFile.value = null;
+            if (backgroundImageInput.value) {
+                backgroundImageInput.value.value = '';
+            }
             showBackgroundSettings.value = true;
         };
 
         const closeBackgroundSettings = () => {
             showBackgroundSettings.value = false;
+            // Reset preview when closing
+            backgroundImagePreview.value = null;
+            backgroundImageFile.value = null;
+        };
+
+        const removeBackground = async () => {
+            try {
+                const formData = new FormData();
+                formData.append('background_image_url', '');
+                
+                const response = await axios.post(`/api/virtual-office/rooms/${props.roomId}/background`, formData, {
+                    headers: { 'Content-Type': 'multipart/form-data' },
+                });
+                
+                if (room.value) {
+                    room.value.background_image = null;
+                }
+                backgroundImageUrl.value = '';
+                backgroundImagePreview.value = null;
+                backgroundImageFile.value = null;
+                
+                await loadRoom();
+                alert('Background removed successfully!');
+            } catch (error) {
+                alert('Failed to remove background. Please try again.');
+            }
         };
 
         const handleBackgroundImageSelect = (event) => {
@@ -1400,14 +1642,6 @@ export default {
             }
         };
 
-        const startVideoCall = () => {
-            showVideoCall.value = true;
-            // Video call will use existing WebRTC connections
-        };
-
-        const closeVideoCall = () => {
-            showVideoCall.value = false;
-        };
 
         const openInviteModal = () => {
             inviteLink.value = `${window.location.origin}/rooms/${props.roomId}`;
@@ -1446,30 +1680,44 @@ export default {
 
         const saveBackground = async () => {
             try {
+                if (!backgroundImageFile.value && !backgroundImageUrl.value) {
+                    alert('Please select an image file or enter an image URL');
+                    return;
+                }
+
                 const formData = new FormData();
                 
                 if (backgroundImageFile.value) {
                     formData.append('background_image', backgroundImageFile.value);
                 } else if (backgroundImageUrl.value) {
-                    formData.append('background_image_url', backgroundImageUrl.value);
+                    formData.append('background_image_url', backgroundImageUrl.value.trim());
                 }
                 
                 const response = await axios.post(`/api/virtual-office/rooms/${props.roomId}/background`, formData, {
                     headers: { 'Content-Type': 'multipart/form-data' },
                 });
                 
-                room.value.background_image = response.data.background_image;
+                // Update room background image immediately
+                if (room.value && response.data.background_image) {
+                    room.value.background_image = response.data.background_image;
+                } else if (room.value) {
+                    room.value.background_image = null;
+                }
+                
                 backgroundImagePreview.value = null;
                 backgroundImageFile.value = null;
                 if (backgroundImageInput.value) {
                     backgroundImageInput.value.value = '';
                 }
                 
+                // Reload room to ensure background is updated
                 await loadRoom();
                 closeBackgroundSettings();
-            } catch (error) {
                 
-                alert('Failed to save background. Please try again.');
+                alert('Background updated successfully!');
+            } catch (error) {
+                const errorMessage = error.response?.data?.message || 'Failed to save background. Please try again.';
+                alert(errorMessage);
             }
         };
 
@@ -1670,11 +1918,11 @@ export default {
             presenceUpdateInterval = setInterval(() => {
                 updatePresence({ last_seen_at: new Date().toISOString() });
                 updateProximityAudio(); // Update audio volumes based on proximity
-            }, 1000); // Update more frequently for smooth audio
+            }, 30000); // Update every 30 seconds to prevent rate limiting
 
             // Add mouse wheel zoom listener
             if (canvasWrapperRef.value) {
-                canvasWrapperRef.value.addEventListener('wheel', handleWheel, { passive: false });
+                // Mouse wheel zoom is handled by @wheel directive in template
             }
             
         });
@@ -1737,16 +1985,24 @@ export default {
             toggleScreenShare,
             getInitials,
             getImageUrl,
-            toggleAudio,
+            toggleProximityAudio,
+            toggleGlobalAudio,
+            proximityAudioEnabled,
+            globalAudioEnabled,
             toggleVideo,
             handleCanvasClick,
             zoomIn,
             zoomOut,
             resetZoom,
             handleWheel,
+            handlePanStart,
+            handlePanMove,
+            handlePanEnd,
             handleMouseDown,
             handleMouseMove,
             handleMouseUp,
+            panX,
+            panY,
             leaveRoom,
             openSettings,
             closeSettings,
@@ -1775,11 +2031,9 @@ export default {
             backgroundImageInput,
             handleBackgroundImageSelect,
             saveBackground,
+            removeBackground,
             calculateDistance,
             updateProximityAudio,
-            startVideoCall,
-            closeVideoCall,
-            showVideoCall,
             openInviteModal,
             closeInviteModal,
             showInviteModal,
@@ -1860,49 +2114,37 @@ export default {
 .office-canvas-wrapper {
     flex: 1;
     position: relative;
-    overflow: auto;
+    overflow: hidden;
+    width: 100%;
+    height: 100%;
     background: #1a1a1a;
-    min-width: 100%;
-    min-height: 100%;
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
-.zoom-controls {
-    position: absolute;
-    top: 1rem;
-    right: 1rem;
-    z-index: 100;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    background: rgba(42, 42, 42, 0.9);
-    padding: 0.5rem;
-    border-radius: 0.5rem;
+.office-canvas-wrapper:active {
+    cursor: grabbing;
 }
 
-.zoom-btn {
-    width: 40px;
-    height: 40px;
-    background: #3a3a3a;
-    border: none;
-    border-radius: 0.25rem;
-    color: #fff;
-    cursor: pointer;
-    font-size: 1.5rem;
-    font-weight: bold;
-    transition: background 0.2s;
-}
-
-.zoom-btn:hover {
-    background: #4a4a4a;
+.office-canvas-wrapper.panning {
+    cursor: grabbing;
 }
 
 .office-canvas {
-    position: relative;
-    width: 2000px;
-    height: 1500px;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 4000px;
+    height: 3000px;
     background: transparent;
-    cursor: crosshair;
-    transition: transform 0.3s ease;
+    cursor: grab;
+    transition: transform 0.1s ease-out;
+    will-change: transform;
+}
+
+.office-canvas:active {
+    cursor: grabbing;
 }
 
 .workspace-grid {
@@ -1988,6 +2230,123 @@ export default {
 .user-control-btn.active {
     background: #4a90e2;
     border-color: #fff;
+}
+
+.user-control-btn.speaker-btn-normal {
+    font-size: 1.2rem;
+    width: 38px;
+    height: 38px;
+    background: rgba(42, 42, 42, 0.95);
+    border: 2px solid rgba(74, 144, 226, 0.5);
+    position: relative;
+}
+
+.user-control-btn.speaker-btn-normal:hover {
+    background: rgba(74, 144, 226, 0.95);
+    border-color: rgba(74, 144, 226, 1);
+    transform: scale(1.1);
+}
+
+.user-control-btn.speaker-btn-normal.active {
+    background: rgba(74, 144, 226, 1);
+    border-color: rgba(74, 144, 226, 1);
+    box-shadow: 0 0 12px rgba(74, 144, 226, 0.6);
+}
+
+.user-control-btn.speaker-btn-normal .icon-off {
+    opacity: 0.5;
+    position: relative;
+    display: inline-block;
+}
+
+.user-control-btn.speaker-btn-normal .icon-off::after {
+    content: '✕';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #e24a4a;
+    font-size: 1.2rem;
+    font-weight: bold;
+    text-shadow: 0 0 4px rgba(0, 0, 0, 0.8);
+    z-index: 1;
+}
+
+.user-control-btn.speaker-btn-bold {
+    font-size: 1.5rem;
+    font-weight: bold;
+    width: 42px;
+    height: 42px;
+    background: rgba(42, 42, 42, 0.95);
+    border: 2px solid rgba(74, 144, 226, 0.5);
+    position: relative;
+}
+
+.user-control-btn.speaker-btn-bold:hover {
+    background: rgba(74, 144, 226, 0.95);
+    border-color: rgba(74, 144, 226, 1);
+    transform: scale(1.15);
+}
+
+.user-control-btn.speaker-btn-bold.active {
+    background: rgba(74, 144, 226, 1);
+    border-color: rgba(74, 144, 226, 1);
+    box-shadow: 0 0 16px rgba(74, 144, 226, 0.8);
+    animation: pulse 2s infinite;
+}
+
+.user-control-btn.speaker-btn-bold .icon-off {
+    opacity: 0.5;
+    position: relative;
+    display: inline-block;
+}
+
+.user-control-btn.speaker-btn-bold .icon-off::after {
+    content: '✕';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #e24a4a;
+    font-size: 1.4rem;
+    font-weight: bold;
+    text-shadow: 0 0 4px rgba(0, 0, 0, 0.8);
+    z-index: 1;
+}
+
+.user-control-btn.video-btn {
+    position: relative;
+}
+
+.user-control-btn.video-btn.off {
+    opacity: 0.6;
+}
+
+.user-control-btn.video-btn .icon-off {
+    position: relative;
+    display: inline-block;
+}
+
+.user-control-btn.video-btn .cross-mark {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #e24a4a;
+    font-size: 1.2rem;
+    font-weight: bold;
+    text-shadow: 0 0 4px rgba(0, 0, 0, 0.8);
+    z-index: 1;
+    pointer-events: none;
+}
+
+@keyframes pulse {
+    0%, 100% {
+        box-shadow: 0 0 16px rgba(74, 144, 226, 0.8);
+    }
+    50% {
+        box-shadow: 0 0 24px rgba(74, 144, 226, 1);
+    }
 }
 
 .user-control-btn:hover {
@@ -2335,6 +2694,327 @@ export default {
 .loading-content p, .error-content p {
     color: #999;
     margin-bottom: 2rem;
+}
+
+/* Background Modal Styles */
+.background-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    animation: fadeIn 0.2s ease;
+    backdrop-filter: blur(4px);
+}
+
+@keyframes fadeIn {
+    from { 
+        opacity: 0; 
+    }
+    to { 
+        opacity: 1; 
+    }
+}
+
+.background-modal-content {
+    background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%);
+    border-radius: 1rem;
+    width: 90%;
+    max-width: 700px;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+    animation: slideUp 0.3s ease;
+    border: 1px solid #3a3a3a;
+}
+
+@keyframes slideUp {
+    from {
+        transform: translateY(30px);
+        opacity: 0;
+    }
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+
+.background-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1.5rem 2rem;
+    border-bottom: 1px solid #3a3a3a;
+    background: rgba(42, 42, 42, 0.5);
+}
+
+.background-modal-header h2 {
+    margin: 0;
+    font-size: 1.5rem;
+    color: #fff;
+    font-weight: 600;
+}
+
+.modal-close-btn {
+    background: transparent;
+    border: none;
+    color: #999;
+    font-size: 2rem;
+    cursor: pointer;
+    padding: 0;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    transition: all 0.2s;
+    line-height: 1;
+}
+
+.modal-close-btn:hover {
+    background: #3a3a3a;
+    color: #fff;
+    transform: rotate(90deg);
+}
+
+.background-modal-body {
+    padding: 2rem;
+}
+
+.background-preview-container {
+    margin-bottom: 2rem;
+}
+
+.preview-label {
+    display: block;
+    color: #ccc;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.background-preview-large {
+    width: 100%;
+    height: 300px;
+    border-radius: 0.75rem;
+    overflow: hidden;
+    border: 2px solid #4a4a4a;
+    background: #1a1a1a;
+    position: relative;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.background-preview-large img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.background-preview-large.placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%);
+}
+
+.placeholder-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    color: #666;
+}
+
+.placeholder-icon {
+    font-size: 4rem;
+    opacity: 0.5;
+}
+
+.preview-overlay {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+}
+
+.preview-badge {
+    background: rgba(102, 126, 234, 0.95);
+    color: white;
+    padding: 0.5rem 1rem;
+    border-radius: 2rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.background-upload-section,
+.background-url-section {
+    margin-bottom: 1.5rem;
+}
+
+.section-label {
+    display: block;
+    color: #ccc;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.upload-btn {
+    width: 100%;
+    padding: 1rem;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: 0.5rem;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+}
+
+.upload-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
+}
+
+.upload-btn:active {
+    transform: translateY(0);
+}
+
+.upload-hint,
+.url-hint {
+    color: #999;
+    font-size: 0.75rem;
+    margin-top: 0.5rem;
+    margin-bottom: 0;
+    font-style: italic;
+}
+
+.url-input {
+    width: 100%;
+    padding: 0.875rem 1rem;
+    background: #1a1a1a;
+    border: 2px solid #3a3a3a;
+    border-radius: 0.5rem;
+    color: #fff;
+    font-size: 0.9rem;
+    transition: all 0.3s;
+    box-sizing: border-box;
+}
+
+.url-input:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    background: #222;
+}
+
+.file-input-hidden {
+    display: none;
+}
+
+.background-actions {
+    margin-top: 1rem;
+}
+
+.remove-btn {
+    width: 100%;
+    padding: 0.875rem;
+    background: #e24a4a;
+    color: white;
+    border: none;
+    border-radius: 0.5rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+}
+
+.remove-btn:hover {
+    background: #c43a3a;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(226, 74, 74, 0.4);
+}
+
+.remove-btn:active {
+    transform: translateY(0);
+}
+
+.background-modal-footer {
+    display: flex;
+    gap: 1rem;
+    padding: 1.5rem 2rem;
+    border-top: 1px solid #3a3a3a;
+    justify-content: flex-end;
+    background: rgba(42, 42, 42, 0.3);
+}
+
+.cancel-btn {
+    padding: 0.75rem 1.5rem;
+    background: #3a3a3a;
+    color: #fff;
+    border: none;
+    border-radius: 0.5rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.cancel-btn:hover {
+    background: #4a4a4a;
+    transform: translateY(-1px);
+}
+
+.save-btn {
+    padding: 0.75rem 1.5rem;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: 0.5rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+}
+
+.save-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
+}
+
+.save-btn:active {
+    transform: translateY(0);
+}
+
+.btn-icon {
+    font-size: 1rem;
+    display: inline-block;
 }
 </style>
 
