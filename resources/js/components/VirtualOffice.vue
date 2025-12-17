@@ -65,16 +65,15 @@
                 >
                     <div class="avatar-circle">
                         <!-- Show video when camera is ON and stream exists -->
-                        <div v-if="presence.video_enabled && videoStreams[presence.user_id]" class="video-overlay-inner">
-                            <video
-                                :ref="el => setVideoRef(el, presence.user_id)"
-                                autoplay
-                                playsinline
-                                muted
-                                class="avatar-video"
-                                @loadedmetadata="updateProximityAudio"
-                            ></video>
-                        </div>
+                        <video
+                            v-if="(presence.user_id === currentUserId ? videoEnabled : presence.video_enabled) && (videoStreams[presence.user_id] || (presence.user_id === currentUserId && localStream && videoEnabled))"
+                            :ref="el => setVideoRef(el, presence.user_id)"
+                            autoplay
+                            playsinline
+                            :muted="presence.user_id === currentUserId"
+                            class="avatar-video"
+                            @loadedmetadata="updateProximityAudio"
+                        ></video>
                         <!-- Show avatar image when camera is OFF or no video stream -->
                         <template v-else>
                             <img 
@@ -539,8 +538,13 @@ export default {
         const setVideoRef = (el, userId) => {
             if (el) {
                 videoRefs.value[userId] = el;
-                if (videoStreams.value[userId]) {
+                // For current user, use localStream if video is enabled
+                if (userId === currentUserId.value && localStream.value && videoEnabled.value) {
+                    el.srcObject = localStream.value;
+                    el.play().catch(err => console.warn('Video play failed:', err));
+                } else if (videoStreams.value[userId]) {
                     el.srcObject = videoStreams.value[userId];
+                    el.play().catch(err => console.warn('Video play failed:', err));
                 }
             }
         };
@@ -785,6 +789,17 @@ export default {
                 
                 localStream.value = stream;
                 
+                // Set videoStreams for current user if video is enabled
+                if (videoEnabled.value && currentUserId.value) {
+                    videoStreams.value[currentUserId.value] = stream;
+                    // Update the video element if it exists
+                    await nextTick();
+                    const videoEl = videoRefs.value[currentUserId.value];
+                    if (videoEl) {
+                        videoEl.srcObject = stream;
+                    }
+                }
+                
                 // Add stream to all existing peer connections
                 Object.entries(peers.value).forEach(([userId, peer]) => {
                     if (peer && peer.addTrack) {
@@ -792,7 +807,7 @@ export default {
                             try {
                                 peer.addTrack(track, stream);
                             } catch (err) {
-
+                                // Silently fail - peer might already have track
                             }
                         });
                     }
@@ -1195,45 +1210,75 @@ export default {
         };
 
         const toggleVideo = async () => {
-            videoEnabled.value = !videoEnabled.value;
-            
-            if (localStream.value) {
-                localStream.value.getVideoTracks().forEach(track => {
-                    track.enabled = videoEnabled.value;
-                });
+            try {
+                const newVideoState = !videoEnabled.value;
+                videoEnabled.value = newVideoState;
                 
-                // Update all peer connections with the new video track state
-                Object.values(peers.value).forEach(peer => {
-                    if (peer && peer._pc) {
-                        const senders = peer._pc.getSenders();
-                        senders.forEach(sender => {
-                            if (sender.track && sender.track.kind === 'video' && !sender.track.label.toLowerCase().includes('screen')) {
-                                sender.track.enabled = videoEnabled.value;
-                            }
-                        });
-                    }
-                });
-            } else if (videoEnabled.value) {
-                // If stream doesn't exist and we're enabling video, get new stream
-                try {
-                    const stream = await navigator.mediaDevices.getUserMedia({
-                        video: true,
-                        audio: audioEnabled.value,
+                if (localStream.value) {
+                    // Enable/disable video tracks
+                    localStream.value.getVideoTracks().forEach(track => {
+                        if (!track.label.toLowerCase().includes('screen')) {
+                            track.enabled = newVideoState;
+                        }
                     });
-                    localStream.value = stream;
-                    // Update all peer connections with new stream
-                    Object.values(peers.value).forEach(peer => {
-                        stream.getVideoTracks().forEach(track => {
-                            peer.addTrack(track, stream);
-                        });
-                    });
-                } catch (error) {
                     
-                    videoEnabled.value = false;
+                    // Update videoStreams for current user to show/hide video in avatar
+                    if (newVideoState) {
+                        videoStreams.value[currentUserId.value] = localStream.value;
+                    } else {
+                        delete videoStreams.value[currentUserId.value];
+                    }
+                    
+                    // Update the video element if it exists
+                    await nextTick();
+                    const videoEl = videoRefs.value[currentUserId.value];
+                    if (videoEl) {
+                        if (newVideoState && localStream.value) {
+                            videoEl.srcObject = localStream.value;
+                            videoEl.play().catch(err => console.warn('Video play failed:', err));
+                        } else {
+                            videoEl.srcObject = null;
+                        }
+                    }
+                    
+                    // Update all peer connections with the new video track state
+                    Object.values(peers.value).forEach(peer => {
+                        if (peer && peer._pc) {
+                            const senders = peer._pc.getSenders();
+                            senders.forEach(sender => {
+                                if (sender.track && sender.track.kind === 'video' && !sender.track.label.toLowerCase().includes('screen')) {
+                                    sender.track.enabled = newVideoState;
+                                }
+                            });
+                        }
+                    });
+                } else if (newVideoState) {
+                    // If stream doesn't exist and we're enabling video, get new stream
+                    await initializeMedia();
+                    // After initializing, set videoStreams for current user
+                    if (localStream.value && videoEnabled.value) {
+                        videoStreams.value[currentUserId.value] = localStream.value;
+                        await nextTick();
+                        const videoEl = videoRefs.value[currentUserId.value];
+                        if (videoEl) {
+                            videoEl.srcObject = localStream.value;
+                            videoEl.play().catch(err => console.warn('Video play failed:', err));
+                        }
+                    }
                 }
+                
+                // Update presence in database and local state
+                await updatePresence({ video_enabled: newVideoState });
+                
+                // Update local presence object to reflect the change immediately
+                const currentPresence = presences.value.find(p => p.user_id === currentUserId.value);
+                if (currentPresence) {
+                    currentPresence.video_enabled = newVideoState;
+                }
+            } catch (error) {
+                console.error('Failed to toggle video:', error);
+                videoEnabled.value = !videoEnabled.value; // Revert on error
             }
-            
-            await updatePresence({ video_enabled: videoEnabled.value });
         };
 
         const handleCanvasClick = (event) => {
@@ -2411,21 +2456,17 @@ export default {
     z-index: 1;
 }
 
-.video-overlay-inner {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    border-radius: 50%;
-    overflow: hidden;
-}
-
 .avatar-video {
     width: 100%;
     height: 100%;
     object-fit: cover;
     border-radius: 50%;
+    display: block;
+    background: #000;
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 2;
 }
 
 .user-info {
