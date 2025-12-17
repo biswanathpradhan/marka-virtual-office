@@ -1214,56 +1214,156 @@ export default {
                 const newVideoState = !videoEnabled.value;
                 videoEnabled.value = newVideoState;
                 
-                if (localStream.value) {
-                    // Enable/disable video tracks
-                    localStream.value.getVideoTracks().forEach(track => {
-                        if (!track.label.toLowerCase().includes('screen')) {
-                            track.enabled = newVideoState;
-                        }
-                    });
+                if (newVideoState) {
+                    // Turning camera ON
+                    // Check if we have a valid video track that's not stopped
+                    const hasValidVideoTrack = localStream.value && 
+                        localStream.value.getVideoTracks().some(track => 
+                            !track.label.toLowerCase().includes('screen') && 
+                            track.readyState === 'live'
+                        );
                     
-                    // Update videoStreams for current user to show/hide video in avatar
-                    if (newVideoState) {
-                        videoStreams.value[currentUserId.value] = localStream.value;
-                    } else {
-                        delete videoStreams.value[currentUserId.value];
-                    }
-                    
-                    // Update the video element if it exists
-                    await nextTick();
-                    const videoEl = videoRefs.value[currentUserId.value];
-                    if (videoEl) {
-                        if (newVideoState && localStream.value) {
-                            videoEl.srcObject = localStream.value;
-                            videoEl.play().catch(err => console.warn('Video play failed:', err));
-                        } else {
-                            videoEl.srcObject = null;
-                        }
-                    }
-                    
-                    // Update all peer connections with the new video track state
-                    Object.values(peers.value).forEach(peer => {
-                        if (peer && peer._pc) {
-                            const senders = peer._pc.getSenders();
-                            senders.forEach(sender => {
-                                if (sender.track && sender.track.kind === 'video' && !sender.track.label.toLowerCase().includes('screen')) {
-                                    sender.track.enabled = newVideoState;
+                    if (!hasValidVideoTrack) {
+                        // Need to get a new stream with video
+                        try {
+                            // Stop old video tracks if they exist
+                            if (localStream.value) {
+                                localStream.value.getVideoTracks().forEach(track => {
+                                    if (!track.label.toLowerCase().includes('screen')) {
+                                        track.stop();
+                                    }
+                                });
+                            }
+                            
+                            // Get new stream with video
+                            const newStream = await navigator.mediaDevices.getUserMedia({
+                                video: true,
+                                audio: audioEnabled.value,
+                            });
+                            
+                            // If we had an existing stream, merge audio tracks if needed
+                            if (localStream.value && audioEnabled.value) {
+                                // Keep existing audio tracks if they're still live
+                                const existingAudioTracks = localStream.value.getAudioTracks().filter(t => t.readyState === 'live');
+                                if (existingAudioTracks.length > 0) {
+                                    // Use existing audio tracks
+                                    newStream.getAudioTracks().forEach(track => track.stop());
+                                    existingAudioTracks.forEach(track => {
+                                        newStream.addTrack(track);
+                                    });
+                                }
+                                
+                                // Stop old stream's video tracks
+                                localStream.value.getVideoTracks().forEach(track => {
+                                    if (!track.label.toLowerCase().includes('screen')) {
+                                        track.stop();
+                                    }
+                                });
+                            }
+                            
+                            localStream.value = newStream;
+                            
+                            // Update videoStreams for current user
+                            videoStreams.value[currentUserId.value] = newStream;
+                            
+                            // Update the video element
+                            await nextTick();
+                            const videoEl = videoRefs.value[currentUserId.value];
+                            if (videoEl) {
+                                videoEl.srcObject = newStream;
+                                videoEl.play().catch(err => console.warn('Video play failed:', err));
+                            }
+                            
+                            // Update all peer connections with new video track
+                            Object.values(peers.value).forEach(peer => {
+                                if (peer && peer._pc) {
+                                    newStream.getVideoTracks().forEach(videoTrack => {
+                                        if (!videoTrack.label.toLowerCase().includes('screen')) {
+                                            try {
+                                                const senders = peer._pc.getSenders();
+                                                const existingVideoSender = senders.find(s => 
+                                                    s.track && s.track.kind === 'video' && 
+                                                    !s.track.label.toLowerCase().includes('screen')
+                                                );
+                                                
+                                                if (existingVideoSender) {
+                                                    existingVideoSender.replaceTrack(videoTrack);
+                                                } else {
+                                                    peer._pc.addTrack(videoTrack, newStream);
+                                                }
+                                            } catch (err) {
+                                                console.warn('Failed to update peer video track:', err);
+                                            }
+                                        }
+                                    });
                                 }
                             });
+                        } catch (error) {
+                            console.error('Failed to enable video:', error);
+                            videoEnabled.value = false;
+                            throw error;
                         }
-                    });
-                } else if (newVideoState) {
-                    // If stream doesn't exist and we're enabling video, get new stream
-                    await initializeMedia();
-                    // After initializing, set videoStreams for current user
-                    if (localStream.value && videoEnabled.value) {
+                    } else {
+                        // Video track exists and is live, just enable it
+                        localStream.value.getVideoTracks().forEach(track => {
+                            if (!track.label.toLowerCase().includes('screen')) {
+                                track.enabled = true;
+                            }
+                        });
+                        
                         videoStreams.value[currentUserId.value] = localStream.value;
+                        
                         await nextTick();
                         const videoEl = videoRefs.value[currentUserId.value];
                         if (videoEl) {
                             videoEl.srcObject = localStream.value;
                             videoEl.play().catch(err => console.warn('Video play failed:', err));
                         }
+                        
+                        // Update peer connections
+                        Object.values(peers.value).forEach(peer => {
+                            if (peer && peer._pc) {
+                                const senders = peer._pc.getSenders();
+                                senders.forEach(sender => {
+                                    if (sender.track && sender.track.kind === 'video' && !sender.track.label.toLowerCase().includes('screen')) {
+                                        sender.track.enabled = true;
+                                    }
+                                });
+                            }
+                        });
+                    }
+                } else {
+                    // Turning camera OFF
+                    if (localStream.value) {
+                        // STOP video tracks completely (this stops the camera hardware)
+                        localStream.value.getVideoTracks().forEach(track => {
+                            if (!track.label.toLowerCase().includes('screen')) {
+                                track.stop(); // This stops the camera hardware
+                                track.enabled = false;
+                            }
+                        });
+                        
+                        // Remove video stream for current user
+                        delete videoStreams.value[currentUserId.value];
+                        
+                        // Update the video element
+                        await nextTick();
+                        const videoEl = videoRefs.value[currentUserId.value];
+                        if (videoEl) {
+                            videoEl.srcObject = null;
+                        }
+                        
+                        // Update all peer connections
+                        Object.values(peers.value).forEach(peer => {
+                            if (peer && peer._pc) {
+                                const senders = peer._pc.getSenders();
+                                senders.forEach(sender => {
+                                    if (sender.track && sender.track.kind === 'video' && !sender.track.label.toLowerCase().includes('screen')) {
+                                        sender.track.enabled = false;
+                                    }
+                                });
+                            }
+                        });
                     }
                 }
                 
