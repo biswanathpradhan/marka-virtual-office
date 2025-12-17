@@ -1812,9 +1812,12 @@ export default {
         };
 
         onMounted(async () => {
-
-
-
+            // Fetch CSRF cookie for Sanctum authentication (required for production)
+            try {
+                await axios.get('/sanctum/csrf-cookie');
+            } catch (csrfError) {
+                console.warn('CSRF cookie fetch failed:', csrfError);
+            }
             
             if (!props.roomId || props.roomId === 'null' || props.roomId === null) {
                 error.value = 'Room ID is required';

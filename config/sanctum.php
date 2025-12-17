@@ -3,11 +3,13 @@
 use Laravel\Sanctum\Sanctum;
 
 return [
-    'stateful' => explode(',', env('SANCTUM_STATEFUL_DOMAINS', sprintf(
-        '%s%s',
+    'stateful' => array_filter(array_map('trim', explode(',', env('SANCTUM_STATEFUL_DOMAINS', sprintf(
+        '%s%s%s%s',
         'localhost,localhost:3000,127.0.0.1,127.0.0.1:8000,::1',
-        Sanctum::currentApplicationUrlWithPort()
-    ))),
+        env('APP_URL') ? ',' . parse_url(env('APP_URL'), PHP_URL_HOST) : '',
+        env('APP_URL') && parse_url(env('APP_URL'), PHP_URL_PORT) ? ':' . parse_url(env('APP_URL'), PHP_URL_PORT) : '',
+        ',video-call.hmindustries.co'
+    ))))),
     'guard' => ['web'],
     'expiration' => null,
     'token_prefix' => env('SANCTUM_TOKEN_PREFIX', ''),

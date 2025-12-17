@@ -17,10 +17,10 @@ return [
         Str::slug(env('APP_NAME', 'laravel'), '_').'_session'
     ),
     'path' => '/',
-    'domain' => env('SESSION_DOMAIN'),
-    'secure' => env('SESSION_SECURE_COOKIE'),
+    'domain' => env('SESSION_DOMAIN', null),
+    'secure' => env('SESSION_SECURE_COOKIE', null),
     'http_only' => true,
-    'same_site' => 'lax',
+    'same_site' => env('SESSION_SAME_SITE', 'lax'),
     'partitioned' => false,
 ];
 
