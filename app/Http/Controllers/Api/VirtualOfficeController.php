@@ -154,8 +154,16 @@ class VirtualOfficeController extends Controller
             ->first();
 
         if ($presence) {
+            // Update presence status to offline
+            $presence->update([
+                'status' => 'offline',
+                'last_seen_at' => now(),
+                'video_enabled' => false,
+                'audio_enabled' => false,
+            ]);
+            
+            // Broadcast to other users that this user left
             broadcast(new \App\Events\UserLeftRoom($presence))->toOthers();
-            $presence->update(['status' => 'offline']);
         }
 
         return response()->json(['message' => 'Left room successfully']);

@@ -13,12 +13,18 @@
                 <button @click="window.location.href = '/rooms'" class="btn-primary">Go Back to Rooms</button>
             </div>
         </div>
-        <div v-else class="office-content">
+        <div v-else class="office-content" :class="{ 'has-video-panel': hasActiveCameras }">
         <div class="office-header">
             <h1>{{ room?.name || 'Virtual Office' }}</h1>
             <div class="header-controls">
                 <button @click="toggleChat" class="control-btn" :class="{ active: showChat }">
                     💬 Chat
+                </button>
+                <button @click="toggleVideoPanel" class="control-btn" :class="{ active: showVideoPanel && hasActiveCameras }" title="Toggle Video Panel">
+                    📹 Video
+                </button>
+                <button @click="toggleRecording" class="control-btn" :class="{ active: isRecording, danger: isRecording }" :title="isRecording ? 'Stop Recording' : 'Start Recording'">
+                    {{ isRecording ? '⏹️ Recording' : '🔴 Record' }}
                 </button>
                 <button @click="openBackgroundSettings" class="control-btn">🖼️ Background</button>
                 <button @click="openProfile" class="control-btn">👤 Profile</button>
@@ -27,7 +33,7 @@
             </div>
         </div>
 
-        <div class="office-canvas-wrapper" ref="canvasWrapperRef" @wheel="handleWheel">
+        <div class="office-canvas-wrapper" ref="canvasWrapperRef" @wheel="handleWheel" :class="{ 'with-video-panel': hasActiveCameras }">
             <div class="office-canvas" ref="canvasRef" 
                 @mousedown="handlePanStart" 
                 @mousemove="handlePanMove" 
@@ -64,27 +70,15 @@
                     @mousedown="presence.user_id === currentUserId ? handleMouseDown($event, presence) : null"
                 >
                     <div class="avatar-circle">
-                        <!-- Show video when camera is ON and stream exists -->
-                        <video
-                            v-if="(presence.user_id === currentUserId ? videoEnabled : presence.video_enabled) && (videoStreams[presence.user_id] || (presence.user_id === currentUserId && localStream && videoEnabled))"
-                            :ref="el => setVideoRef(el, presence.user_id)"
-                            autoplay
-                            playsinline
-                            :muted="presence.user_id === currentUserId"
-                            class="avatar-video"
-                            @loadedmetadata="updateProximityAudio"
-                        ></video>
-                        <!-- Show avatar image when camera is OFF or no video stream -->
-                        <template v-else>
-                            <img 
-                                v-if="presence.user?.avatar_url || presence.avatar_url" 
-                                :src="getImageUrl(presence.user?.avatar_url || presence.avatar_url)" 
-                                :alt="presence.user?.name || 'User'"
-                                @error="handleImageError"
-                                class="avatar-img"
-                            />
-                            <span v-else class="avatar-initials">{{ getInitials(presence.user?.name || 'User') }}</span>
-                        </template>
+                        <!-- Always show avatar image (video moved to right panel) -->
+                        <img 
+                            v-if="presence.user?.avatar_url || presence.avatar_url" 
+                            :src="getImageUrl(presence.user?.avatar_url || presence.avatar_url)" 
+                            :alt="presence.user?.name || 'User'"
+                            @error="handleImageError"
+                            class="avatar-img"
+                        />
+                        <span v-else class="avatar-initials">{{ getInitials(presence.user?.name || 'User') }}</span>
                     </div>
                     <div class="user-info">
                         <div class="user-name">{{ presence.user?.name || 'User' }}</div>
@@ -103,18 +97,9 @@
                             @click.stop="toggleProximityAudio" 
                             :class="{ active: proximityAudioEnabled }" 
                             class="user-control-btn speaker-btn-normal"
-                            title="Proximity Speaker - Only nearby users can hear"
+                            title="Toggle Audio"
                         >
                             <span v-if="proximityAudioEnabled">🔊</span>
-                            <span v-else class="icon-off">🔇</span>
-                        </button>
-                        <button 
-                            @click.stop="toggleGlobalAudio" 
-                            :class="{ active: globalAudioEnabled }" 
-                            class="user-control-btn speaker-btn-bold"
-                            title="Global Speaker - All users can hear"
-                        >
-                            <span v-if="globalAudioEnabled">🔊</span>
                             <span v-else class="icon-off">🔇</span>
                         </button>
                         <button 
@@ -151,6 +136,57 @@
                         playsinline
                         class="user-screen"
                     ></video>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Side Video Panel -->
+        <div 
+            v-if="hasActiveCameras && showVideoPanel" 
+            class="video-panel"
+            :style="{ left: videoPanelPosition.x + 'px', top: videoPanelPosition.y + 'px', right: 'auto' }"
+        >
+            <div class="video-panel-header" @mousedown="startDragVideoPanel">
+                <h3>Video Call</h3>
+                <button @click="closeVideoPanel" class="video-panel-close-btn" title="Hide Video Panel">×</button>
+            </div>
+            <div class="video-panel-content" :class="{ 'multi-user': activeVideoUsers.length > 1 }" @mousedown.stop>
+                <!-- Current User Video -->
+                <div v-if="videoEnabled" class="video-panel-item">
+                    <div class="video-panel-header-item">
+                        <h4>{{ currentUserProfile?.name || 'You' }}</h4>
+                    </div>
+                    <video
+                        :ref="el => setVideoPanelRef(el, currentUserId, 'local')"
+                        autoplay
+                        playsinline
+                        muted
+                        class="video-panel-video"
+                        @loadedmetadata="handleVideoLoaded"
+                        @canplay="handleVideoLoaded"
+                        @playing="() => console.log('Video is playing')"
+                    ></video>
+                </div>
+                <!-- Other Users Videos -->
+                <div 
+                    v-for="presence in presences.filter(p => p.video_enabled && p.user_id !== currentUserId && videoStreams[p.user_id])" 
+                    :key="presence.user_id"
+                    class="video-panel-item"
+                >
+                    <div class="video-panel-header-item">
+                        <h4>{{ presence.user?.name || 'User' }}</h4>
+                    </div>
+                    <video
+                        :ref="el => setVideoPanelRef(el, presence.user_id, 'remote')"
+                        autoplay
+                        playsinline
+                        class="video-panel-video"
+                        @loadedmetadata="handleVideoLoaded"
+                        @canplay="handleVideoLoaded"
+                    ></video>
+                </div>
+                <div v-if="!videoEnabled && activeVideoUsers.length === 0" class="video-panel-empty">
+                    <p>No active cameras. Turn on your camera to see video.</p>
                 </div>
             </div>
         </div>
@@ -448,7 +484,7 @@
 </template>
 
 <script>
-import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue';
+import { ref, onMounted, onUnmounted, nextTick, watch, computed } from 'vue';
 import axios from 'axios';
 import SimplePeer from 'simple-peer';
 
@@ -467,7 +503,6 @@ export default {
         const currentUserId = ref(null);
         const audioEnabled = ref(false);
         const proximityAudioEnabled = ref(false);
-        const globalAudioEnabled = ref(false);
         const videoEnabled = ref(false); // Camera OFF by default
         const canvasRef = ref(null);
         const canvasWrapperRef = ref(null);
@@ -527,10 +562,18 @@ export default {
         const screenStreams = ref({});
         const videoRefs = ref({});
         const screenRefs = ref({});
+        const videoPanelRefs = ref({});
         const isScreenSharing = ref(false);
         const isDragging = ref(false);
         const dragStartPos = ref({ x: 0, y: 0 });
         const dragStartMouse = ref({ x: 0, y: 0 });
+        const isRecording = ref(false);
+        const mediaRecorder = ref(null);
+        const recordedChunks = ref([]);
+        const showVideoPanel = ref(true);
+        const videoPanelPosition = ref({ x: window.innerWidth - 620, y: 0 });
+        const isDraggingVideoPanel = ref(false);
+        const videoPanelDragStart = ref({ x: 0, y: 0 });
 
         let presenceUpdateInterval = null;
         let iceServers = [];
@@ -555,6 +598,286 @@ export default {
                 if (screenStreams.value[userId]) {
                     el.srcObject = screenStreams.value[userId];
                 }
+            }
+        };
+
+        const setVideoPanelRef = (el, userId, type) => {
+            if (el) {
+                const key = `${userId}-${type}`;
+                videoPanelRefs.value[key] = el;
+                console.log('Video panel ref set:', key, 'videoEnabled:', videoEnabled.value, 'localStream:', !!localStream.value);
+                // Immediately try to set the stream
+                updateVideoPanelStream(el, userId, type);
+                // Also set up event listeners
+                el.addEventListener('loadedmetadata', () => {
+                    console.log('Video metadata loaded for:', key);
+                    el.play().catch(err => {
+                        console.warn('Video play on metadata failed:', err);
+                        setTimeout(() => el.play().catch(() => {}), 100);
+                    });
+                });
+                // Also listen for stream changes
+                if (type === 'local' && videoEnabled.value) {
+                    // Poll for stream if not ready
+                    const checkStream = setInterval(() => {
+                        if (localStream.value && el.srcObject !== localStream.value) {
+                            console.log('Stream now available, setting srcObject');
+                            el.srcObject = localStream.value;
+                            el.play().catch(() => {});
+                            clearInterval(checkStream);
+                        }
+                    }, 200);
+                    // Clear after 5 seconds
+                    setTimeout(() => clearInterval(checkStream), 5000);
+                }
+            }
+        };
+
+        const updateVideoPanelStream = (el, userId, type) => {
+            if (!el) return;
+            try {
+                if (type === 'local' && localStream.value && videoEnabled.value) {
+                    // Check if stream has video tracks
+                    const videoTracks = localStream.value.getVideoTracks();
+                    if (videoTracks.length > 0) {
+                        // Set srcObject regardless of readyState - it will become live
+                        el.srcObject = localStream.value;
+                        // Force play with multiple retries
+                        const tryPlay = () => {
+                            el.play().catch(err => {
+                                console.warn('Video panel play failed, retrying:', err);
+                                setTimeout(tryPlay, 200);
+                            });
+                        };
+                        setTimeout(tryPlay, 100);
+                    }
+                } else if (type === 'remote' && videoStreams.value[userId]) {
+                    const stream = videoStreams.value[userId];
+                    const videoTracks = stream.getVideoTracks();
+                    if (videoTracks.length > 0) {
+                        // Set srcObject regardless of readyState
+                        el.srcObject = stream;
+                        // Force play with multiple retries
+                        const tryPlay = () => {
+                            el.play().catch(err => {
+                                console.warn('Video panel play failed, retrying:', err);
+                                setTimeout(tryPlay, 200);
+                            });
+                        };
+                        setTimeout(tryPlay, 100);
+                    }
+                }
+            } catch (error) {
+                console.error('Error updating video panel stream:', error);
+            }
+        };
+
+        const handleVideoLoaded = (event) => {
+            const video = event.target;
+            if (video && video.srcObject) {
+                // Ensure video plays after metadata is loaded
+                const tryPlay = () => {
+                    if (video.readyState >= 2) { // HAVE_CURRENT_DATA or higher
+                        video.play().catch(err => {
+                            console.warn('Video play after load failed:', err);
+                            // Try again after a short delay
+                            setTimeout(() => {
+                                video.play().catch(() => {});
+                            }, 200);
+                        });
+                    } else {
+                        // Wait for video to be ready
+                        setTimeout(tryPlay, 100);
+                    }
+                };
+                setTimeout(tryPlay, 50);
+            }
+        };
+
+        // Computed for active video users
+        const activeVideoUsers = computed(() => {
+            const users = [];
+            if (videoEnabled.value && localStream.value) {
+                users.push({ userId: currentUserId.value, name: currentUserProfile.value?.name || 'You', type: 'local' });
+            }
+            presences.value.forEach(p => {
+                if (p.video_enabled && p.user_id !== currentUserId.value && videoStreams.value[p.user_id]) {
+                    users.push({ userId: p.user_id, name: p.user?.name || 'User', type: 'remote' });
+                }
+            });
+            return users;
+        });
+
+        // Computed property to check if any cameras are active
+        const hasActiveCameras = computed(() => {
+            if (videoEnabled.value && localStream.value) return true;
+            return presences.value.some(p => p.video_enabled && p.user_id !== currentUserId.value && videoStreams.value[p.user_id]);
+        });
+
+        const closeVideoPanel = () => {
+            showVideoPanel.value = false;
+        };
+
+        const toggleVideoPanel = () => {
+            if (hasActiveCameras.value) {
+                showVideoPanel.value = !showVideoPanel.value;
+            } else {
+                alert('No active cameras. Turn on your camera or wait for others to turn on theirs.');
+            }
+        };
+
+        // Draggable video panel
+        const startDragVideoPanel = (e) => {
+            // Don't drag if clicking on close button
+            if (e.target.closest('.video-panel-close-btn')) {
+                return;
+            }
+            e.preventDefault();
+            isDraggingVideoPanel.value = true;
+            videoPanelDragStart.value = {
+                x: e.clientX - videoPanelPosition.value.x,
+                y: e.clientY - videoPanelPosition.value.y
+            };
+            document.addEventListener('mousemove', handleVideoPanelDrag);
+            document.addEventListener('mouseup', stopDragVideoPanel);
+        };
+
+        const handleVideoPanelDrag = (e) => {
+            if (!isDraggingVideoPanel.value) return;
+            videoPanelPosition.value = {
+                x: e.clientX - videoPanelDragStart.value.x,
+                y: e.clientY - videoPanelDragStart.value.y
+            };
+            // Keep panel within viewport
+            const maxX = window.innerWidth - 400;
+            const maxY = window.innerHeight - 100;
+            videoPanelPosition.value.x = Math.max(0, Math.min(videoPanelPosition.value.x, maxX));
+            videoPanelPosition.value.y = Math.max(0, Math.min(videoPanelPosition.value.y, maxY));
+        };
+
+        const stopDragVideoPanel = () => {
+            isDraggingVideoPanel.value = false;
+            document.removeEventListener('mousemove', handleVideoPanelDrag);
+            document.removeEventListener('mouseup', stopDragVideoPanel);
+        };
+
+        // Recording functionality
+        const toggleRecording = async () => {
+            if (isRecording.value) {
+                // Stop recording
+                if (mediaRecorder.value && mediaRecorder.value.state !== 'inactive') {
+                    mediaRecorder.value.stop();
+                }
+                isRecording.value = false;
+            } else {
+                // Start recording
+                try {
+                    await startRecording();
+                } catch (error) {
+                    console.error('Failed to start recording:', error);
+                    alert('Failed to start recording. Please check your permissions.');
+                }
+            }
+        };
+
+        const startRecording = async () => {
+            try {
+                // Collect all active streams
+                const streamsToRecord = [];
+                
+                // Add local stream if video/audio is enabled
+                if (localStream.value) {
+                    streamsToRecord.push(localStream.value);
+                }
+                
+                // Add remote video streams
+                Object.values(videoStreams.value).forEach(stream => {
+                    if (stream) {
+                        streamsToRecord.push(stream);
+                    }
+                });
+                
+                if (streamsToRecord.length === 0) {
+                    alert('No active streams to record');
+                    return;
+                }
+                
+                // Create a combined stream (for simplicity, we'll record the local stream with audio from all)
+                // In a more advanced implementation, you'd mix multiple streams
+                const combinedStream = new MediaStream();
+                
+                // Add all video tracks
+                streamsToRecord.forEach(stream => {
+                    stream.getVideoTracks().forEach(track => {
+                        combinedStream.addTrack(track);
+                    });
+                });
+                
+                // Add all audio tracks
+                streamsToRecord.forEach(stream => {
+                    stream.getAudioTracks().forEach(track => {
+                        combinedStream.addTrack(track);
+                    });
+                });
+                
+                // If no tracks, get user media
+                if (combinedStream.getTracks().length === 0) {
+                    const userMedia = await navigator.mediaDevices.getUserMedia({ 
+                        video: videoEnabled.value, 
+                        audio: true 
+                    });
+                    userMedia.getTracks().forEach(track => combinedStream.addTrack(track));
+                }
+                
+                const options = {
+                    mimeType: 'video/webm;codecs=vp9,opus',
+                    videoBitsPerSecond: 2500000
+                };
+                
+                // Fallback to webm if vp9 not supported
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options.mimeType = 'video/webm;codecs=vp8,opus';
+                }
+                
+                // Final fallback
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options.mimeType = 'video/webm';
+                }
+                
+                recordedChunks.value = [];
+                const recorder = new MediaRecorder(combinedStream, options);
+                
+                recorder.ondataavailable = (event) => {
+                    if (event.data && event.data.size > 0) {
+                        recordedChunks.value.push(event.data);
+                    }
+                };
+                
+                recorder.onstop = () => {
+                    const blob = new Blob(recordedChunks.value, { type: 'video/webm' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `recording-${new Date().toISOString()}.webm`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    recordedChunks.value = [];
+                };
+                
+                recorder.onerror = (event) => {
+                    console.error('Recording error:', event);
+                    isRecording.value = false;
+                    alert('Recording error occurred');
+                };
+                
+                mediaRecorder.value = recorder;
+                recorder.start(1000); // Collect data every second
+                isRecording.value = true;
+            } catch (error) {
+                console.error('Error starting recording:', error);
+                throw error;
             }
         };
 
@@ -755,7 +1078,6 @@ export default {
                     // Initialize media with audio only (camera OFF by default)
                     videoEnabled.value = false;
                     proximityAudioEnabled.value = false;
-                    globalAudioEnabled.value = false;
                     audioEnabled.value = false;
                     await initializeMedia();
                     
@@ -797,6 +1119,12 @@ export default {
                     const videoEl = videoRefs.value[currentUserId.value];
                     if (videoEl) {
                         videoEl.srcObject = stream;
+                    }
+                    // Update video panel
+                    const localKey = `${currentUserId.value}-local`;
+                    const panelEl = videoPanelRefs.value[localKey];
+                    if (panelEl) {
+                        updateVideoPanelStream(panelEl, currentUserId.value, 'local');
                     }
                 }
                 
@@ -924,7 +1252,7 @@ export default {
                 );
                 
                 // If current user has global audio ON, everyone hears at full volume
-                if (globalAudioEnabled.value) {
+                if (proximityAudioEnabled.value) {
                     audioElement.volume = maxVolume;
                 } 
                 // If current user has proximity audio ON, use distance-based volume
@@ -990,6 +1318,12 @@ export default {
                             if (videoRefs.value[userId]) {
                                 videoRefs.value[userId].srcObject = stream;
                                 videoRefs.value[userId].volume = 0.5; // Initial volume
+                            }
+                            // Update video panel
+                            const remoteKey = `${userId}-remote`;
+                            const panelEl = videoPanelRefs.value[remoteKey];
+                            if (panelEl) {
+                                updateVideoPanelStream(panelEl, userId, 'remote');
                             }
                             updateProximityAudio();
                         });
@@ -1132,13 +1466,8 @@ export default {
         };
 
         const toggleProximityAudio = async () => {
-            // Turn off global audio if enabling proximity audio
-            if (!proximityAudioEnabled.value && globalAudioEnabled.value) {
-                globalAudioEnabled.value = false;
-            }
-            
             proximityAudioEnabled.value = !proximityAudioEnabled.value;
-            audioEnabled.value = proximityAudioEnabled.value || globalAudioEnabled.value;
+            audioEnabled.value = proximityAudioEnabled.value;
             
             if (localStream.value) {
                 localStream.value.getAudioTracks().forEach(track => {
@@ -1170,44 +1499,6 @@ export default {
             updateProximityAudio();
         };
 
-        const toggleGlobalAudio = async () => {
-            // Turn off proximity audio if enabling global audio
-            if (!globalAudioEnabled.value && proximityAudioEnabled.value) {
-                proximityAudioEnabled.value = false;
-            }
-            
-            globalAudioEnabled.value = !globalAudioEnabled.value;
-            audioEnabled.value = proximityAudioEnabled.value || globalAudioEnabled.value;
-            
-            if (localStream.value) {
-                localStream.value.getAudioTracks().forEach(track => {
-                    track.enabled = audioEnabled.value;
-                });
-                
-                // Update all peer connections with the new audio track state
-                Object.values(peers.value).forEach(peer => {
-                    if (peer && peer._pc) {
-                        const senders = peer._pc.getSenders();
-                        senders.forEach(sender => {
-                            if (sender.track && sender.track.kind === 'audio') {
-                                sender.track.enabled = audioEnabled.value;
-                            }
-                        });
-                    }
-                });
-            } else if (audioEnabled.value) {
-                // If stream doesn't exist and we're enabling audio, get new stream
-                try {
-                    await initializeMedia();
-                } catch (error) {
-                    console.error('Failed to initialize global audio:', error);
-                    globalAudioEnabled.value = false;
-                    audioEnabled.value = false;
-                }
-            }
-            await updatePresence({ audio_enabled: audioEnabled.value });
-            updateProximityAudio();
-        };
 
         const toggleVideo = async () => {
             try {
@@ -1273,6 +1564,22 @@ export default {
                                 videoEl.srcObject = newStream;
                                 videoEl.play().catch(err => console.warn('Video play failed:', err));
                             }
+                            // Update video panel - wait a bit for DOM to update
+                            await nextTick();
+                            setTimeout(() => {
+                                const localKey = `${currentUserId.value}-local`;
+                                const panelEl = videoPanelRefs.value[localKey];
+                                if (panelEl && newStream) {
+                                    panelEl.srcObject = newStream;
+                                    const tryPlay = () => {
+                                        panelEl.play().catch(err => {
+                                            console.warn('Video panel play failed, retrying:', err);
+                                            setTimeout(tryPlay, 200);
+                                        });
+                                    };
+                                    setTimeout(tryPlay, 100);
+                                }
+                            }, 200);
                             
                             // Update all peer connections with new video track
                             Object.values(peers.value).forEach(peer => {
@@ -1318,6 +1625,12 @@ export default {
                         if (videoEl) {
                             videoEl.srcObject = localStream.value;
                             videoEl.play().catch(err => console.warn('Video play failed:', err));
+                        }
+                        // Update video panel
+                        const localKey = `${currentUserId.value}-local`;
+                        const panelEl = videoPanelRefs.value[localKey];
+                        if (panelEl) {
+                            updateVideoPanelStream(panelEl, currentUserId.value, 'local');
                         }
                         
                         // Update peer connections
@@ -2075,7 +2388,139 @@ export default {
             
         });
 
+        // Cleanup function to leave room and clean up resources
+        const cleanup = async () => {
+            try {
+                // Stop all media tracks
+                if (localStream.value) {
+                    localStream.value.getTracks().forEach(track => track.stop());
+                    localStream.value = null;
+                }
+                
+                if (screenStream.value) {
+                    screenStream.value.getTracks().forEach(track => track.stop());
+                    screenStream.value = null;
+                }
+                
+                // Clean up peer connections
+                Object.values(peers.value).forEach(peer => {
+                    if (peer && peer.destroy) {
+                        peer.destroy();
+                    }
+                });
+                peers.value = {};
+                
+                // Clear intervals
+                if (presenceUpdateInterval) {
+                    clearInterval(presenceUpdateInterval);
+                    presenceUpdateInterval = null;
+                }
+                
+                // Leave room (use sendBeacon for reliability on page unload)
+                if (props.roomId && currentUserId.value) {
+                    const csrfToken = document.head.querySelector('meta[name="csrf-token"]')?.content || '';
+                    
+                    // Try using sendBeacon for better reliability during page unload
+                    // sendBeacon only works with FormData or Blob, not JSON
+                    if (navigator.sendBeacon) {
+                        const formData = new FormData();
+                        formData.append('_token', csrfToken);
+                        navigator.sendBeacon(
+                            `/api/virtual-office/rooms/${props.roomId}/leave`,
+                            formData
+                        );
+                    } else {
+                        // Fallback to fetch with keepalive
+                        fetch(`/api/virtual-office/rooms/${props.roomId}/leave`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-CSRF-TOKEN': csrfToken,
+                                'X-Requested-With': 'XMLHttpRequest'
+                            },
+                            credentials: 'include',
+                            body: JSON.stringify({}),
+                            keepalive: true
+                        }).catch(() => {
+                            // Silently fail - page is unloading
+                        });
+                    }
+                }
+            } catch (error) {
+                // Silently fail during cleanup
+            }
+        };
+        
+        // Handle browser close/tab close
+        const handleBeforeUnload = (event) => {
+            cleanup();
+        };
+        
+        const handleVisibilityChange = () => {
+            if (document.hidden) {
+                // Page is being hidden (tab switch or minimize)
+                // Don't leave room, just pause updates
+            }
+        };
+        
+        // Add event listeners
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        window.addEventListener('pagehide', handleBeforeUnload);
+        window.addEventListener('visibilitychange', handleVisibilityChange);
+        
+        // Watch for video stream changes to update panel
+        watch(() => videoEnabled.value, () => {
+            if (videoEnabled.value && localStream.value) {
+                nextTick(() => {
+                    const localKey = `${currentUserId.value}-local`;
+                    const el = videoPanelRefs.value[localKey];
+                    if (el) {
+                        updateVideoPanelStream(el, currentUserId.value, 'local');
+                    }
+                });
+            }
+            // Show panel when camera is turned on
+            if (videoEnabled.value) {
+                showVideoPanel.value = true;
+            }
+        }, { immediate: true });
+
+        // Watch for local stream changes
+        watch(() => localStream.value, (newStream) => {
+            if (videoEnabled.value && newStream) {
+                nextTick(() => {
+                    const localKey = `${currentUserId.value}-local`;
+                    const el = videoPanelRefs.value[localKey];
+                    if (el) {
+                        updateVideoPanelStream(el, currentUserId.value, 'local');
+                    }
+                });
+            }
+        }, { immediate: true });
+
+        // Watch for remote video streams
+        watch(() => videoStreams.value, () => {
+            nextTick(() => {
+                Object.keys(videoStreams.value).forEach(userId => {
+                    if (userId !== currentUserId.value) {
+                        const remoteKey = `${userId}-remote`;
+                        const el = videoPanelRefs.value[remoteKey];
+                        if (el && videoStreams.value[userId]) {
+                            updateVideoPanelStream(el, userId, 'remote');
+                        }
+                    }
+                });
+            });
+        }, { deep: true, immediate: true });
+
         onUnmounted(() => {
+            // Remove event listeners
+            window.removeEventListener('beforeunload', handleBeforeUnload);
+            window.removeEventListener('pagehide', handleBeforeUnload);
+            window.removeEventListener('visibilitychange', handleVisibilityChange);
+            
+            // Cleanup
+            cleanup();
             if (presenceUpdateInterval) {
                 clearInterval(presenceUpdateInterval);
             }
@@ -2134,10 +2579,19 @@ export default {
             getInitials,
             getImageUrl,
             toggleProximityAudio,
-            toggleGlobalAudio,
             proximityAudioEnabled,
-            globalAudioEnabled,
             toggleVideo,
+            hasActiveCameras,
+            showVideoPanel,
+            closeVideoPanel,
+            toggleVideoPanel,
+            toggleRecording,
+            isRecording,
+            setVideoPanelRef,
+            activeVideoUsers,
+            videoPanelPosition,
+            startDragVideoPanel,
+            handleVideoLoaded,
             handleCanvasClick,
             zoomIn,
             zoomOut,
@@ -2420,46 +2874,131 @@ export default {
     z-index: 1;
 }
 
-.user-control-btn.speaker-btn-bold {
-    font-size: 1.5rem;
-    font-weight: bold;
-    width: 42px;
-    height: 42px;
-    background: rgba(42, 42, 42, 0.95);
+/* Video Panel Styles */
+.video-panel {
+    position: fixed;
+    width: 600px;
+    min-height: 500px;
+    height: auto;
+    max-height: 90vh;
+    background: rgba(26, 26, 26, 0.98);
     border: 2px solid rgba(74, 144, 226, 0.5);
-    position: relative;
+    border-radius: 0.5rem;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    box-shadow: -4px 0 20px rgba(0, 0, 0, 0.5);
+    user-select: none;
 }
 
-.user-control-btn.speaker-btn-bold:hover {
-    background: rgba(74, 144, 226, 0.95);
-    border-color: rgba(74, 144, 226, 1);
-    transform: scale(1.15);
+.video-panel:hover {
+    border-color: rgba(74, 144, 226, 0.8);
 }
 
-.user-control-btn.speaker-btn-bold.active {
-    background: rgba(74, 144, 226, 1);
-    border-color: rgba(74, 144, 226, 1);
-    box-shadow: 0 0 16px rgba(74, 144, 226, 0.8);
-    animation: pulse 2s infinite;
+.video-panel-header {
+    padding: 1rem;
+    border-bottom: 1px solid rgba(74, 144, 226, 0.3);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(42, 42, 42, 0.8);
+    cursor: move;
+    border-radius: 0.5rem 0.5rem 0 0;
+    user-select: none;
 }
 
-.user-control-btn.speaker-btn-bold .icon-off {
-    opacity: 0.5;
-    position: relative;
-    display: inline-block;
+.video-panel-header h3 {
+    margin: 0;
+    color: #fff;
+    font-size: 1.2rem;
 }
 
-.user-control-btn.speaker-btn-bold .icon-off::after {
-    content: '✕';
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    color: #e24a4a;
-    font-size: 1.4rem;
-    font-weight: bold;
-    text-shadow: 0 0 4px rgba(0, 0, 0, 0.8);
-    z-index: 1;
+.video-panel-close-btn {
+    background: transparent;
+    border: none;
+    color: #fff;
+    font-size: 1.5rem;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    transition: all 0.2s;
+}
+
+.video-panel-close-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.video-panel-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    cursor: default;
+    min-height: 450px;
+}
+
+.video-panel-content.multi-user {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1rem;
+}
+
+@media (max-width: 900px) {
+    .video-panel-content.multi-user {
+        grid-template-columns: 1fr;
+    }
+}
+
+.video-panel-item {
+    background: rgba(42, 42, 42, 0.6);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    border: 1px solid rgba(74, 144, 226, 0.3);
+    min-height: 420px;
+    display: flex;
+    flex-direction: column;
+}
+
+.video-panel-header-item {
+    padding: 0.75rem;
+    background: rgba(42, 42, 42, 0.8);
+    border-bottom: 1px solid rgba(74, 144, 226, 0.2);
+}
+
+.video-panel-header-item h4 {
+    margin: 0;
+    color: #fff;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.video-panel-video {
+    width: 100%;
+    min-height: 400px;
+    aspect-ratio: 16 / 9;
+    object-fit: contain;
+    background: #000;
+    display: block;
+    border-radius: 0 0 0.5rem 0.5rem;
+}
+
+.video-panel-content.multi-user .video-panel-item {
+    min-width: 0;
+}
+
+.video-panel-content.multi-user .video-panel-video {
+    min-height: 300px;
+    aspect-ratio: 4 / 3;
+    object-fit: contain;
+}
+
+.video-panel-empty {
+    padding: 2rem;
+    text-align: center;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.9rem;
 }
 
 .user-control-btn.video-btn {
