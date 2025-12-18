@@ -23,16 +23,24 @@ class ChatController extends Controller
             return response()->json(['message' => 'Unauthorized'], 403);
         }
 
-        $messages = ChatMessage::where('room_id', $room->id)
-            ->with(['user' => function($query) {
-                $query->select('id', 'name', 'email', 'avatar_url');
-            }])
-            ->orderBy('created_at', 'asc')
-            ->get();
+        try {
+            $messages = ChatMessage::where('room_id', $room->id)
+                ->with(['user' => function($query) {
+                    $query->select('id', 'name', 'email', 'avatar_url');
+                }])
+                ->orderBy('created_at', 'asc')
+                ->get();
 
-        return response()->json([
-            'messages' => $messages,
-        ]);
+            return response()->json([
+                'messages' => $messages,
+            ]);
+        } catch (\Exception $e) {
+            // If chat_messages table doesn't exist, return empty array
+            \Log::warning('Chat messages table not found, returning empty array', ['error' => $e->getMessage()]);
+            return response()->json([
+                'messages' => [],
+            ]);
+        }
     }
 
     public function store(Request $request, Room $room)

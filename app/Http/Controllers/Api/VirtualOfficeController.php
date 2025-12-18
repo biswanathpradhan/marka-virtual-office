@@ -207,12 +207,6 @@ class VirtualOfficeController extends Controller
             ->orderBy('last_seen_at', 'desc')
             ->get();
 
-        \Log::info('getPresences called', [
-            'room_id' => $room->id,
-            'presences_count' => $presences->count(),
-            'presence_ids' => $presences->pluck('user_id')->toArray(),
-        ]);
-
         return response()->json($presences);
     }
 

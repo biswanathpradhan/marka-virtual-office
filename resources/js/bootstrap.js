@@ -14,48 +14,62 @@ if (token) {
 window.Echo = null;
 window.EchoReady = false;
 
-// Initialize Echo
+// Initialize Echo with self-hosted WebSocket support (FREE, UNLIMITED)
 (async () => {
     try {
-        if (import.meta.env.VITE_PUSHER_APP_KEY) {
-            const { default: Echo } = await import('laravel-echo');
-            const { default: Pusher } = await import('pusher-js');
-            
-            window.Pusher = Pusher;
-            window.Echo = new Echo({
-                broadcaster: 'pusher',
-                key: import.meta.env.VITE_PUSHER_APP_KEY,
-                cluster: import.meta.env.VITE_PUSHER_APP_CLUSTER ?? 'mt1',
-                forceTLS: true,
-                authEndpoint: '/broadcasting/auth',
-                auth: {
-                    headers: {
-                        'X-CSRF-TOKEN': document.head.querySelector('meta[name="csrf-token"]')?.content || '',
-                    },
+        const { default: Echo } = await import('laravel-echo');
+        const { default: Pusher } = await import('pusher-js');
+        
+        window.Pusher = Pusher;
+        
+        // Use self-hosted WebSocket server (free, no limits, no external services)
+        const wsHost = window.location.hostname;
+        const wsPort = import.meta.env.VITE_WEBSOCKET_PORT || '6001';
+        const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+        
+        // Default local keys for self-hosted server
+        const appKey = import.meta.env.VITE_PUSHER_APP_KEY || 'local-key';
+        const appSecret = import.meta.env.VITE_PUSHER_APP_SECRET || 'local-secret';
+        const appId = import.meta.env.VITE_PUSHER_APP_ID || 'local-app-id';
+        
+        window.Echo = new Echo({
+            broadcaster: 'pusher',
+            key: appKey,
+            cluster: import.meta.env.VITE_PUSHER_APP_CLUSTER || 'mt1',
+            wsHost: wsHost,
+            wsPort: parseInt(wsPort),
+            wssPort: parseInt(wsPort),
+            forceTLS: false,
+            encrypted: false,
+            enabledTransports: ['ws', 'wss'],
+            disableStats: true,
+            authEndpoint: '/broadcasting/auth',
+            auth: {
+                headers: {
+                    'X-CSRF-TOKEN': document.head.querySelector('meta[name="csrf-token"]')?.content || '',
                 },
-            });
-        } else {
-            // Fallback if Pusher is not configured - create a mock Echo
-            window.Echo = {
-                private: (channel) => ({
-                    listen: (event, callback) => {
-                        console.warn('Echo not configured - event not listened:', event);
-                        return {
-                            listen: (event, callback) => {
-                                console.warn('Echo not configured - event not listened:', event);
-                                return { listen: () => {} };
-                            }
-                        };
-                    }
-                }),
-            };
-        }
+            },
+        });
+        
+        // Connection event listeners
+        window.Echo.connector.pusher.connection.bind('connected', () => {
+            console.log('✅ Connected to self-hosted WebSocket server (FREE, UNLIMITED)');
+        });
+        
+        window.Echo.connector.pusher.connection.bind('error', (err) => {
+            console.warn('⚠️ WebSocket connection error:', err);
+            console.warn('💡 Make sure the WebSocket server is running on port', wsPort);
+        });
+        
         window.EchoReady = true;
-        console.log('Laravel Echo initialized');
+        console.log('✅ Laravel Echo initialized with self-hosted WebSocket server');
+        console.log('📡 WebSocket connection:', `${wsScheme}://${wsHost}:${wsPort}`);
+        console.log('💰 FREE - No external services, no limits, fully self-hosted!');
     } catch (error) {
-        console.error('Failed to initialize Laravel Echo:', error);
+        console.error('❌ Failed to initialize Laravel Echo:', error);
         // Create a safe fallback
         window.Echo = {
+            _isMock: true,
             private: (channel) => ({
                 listen: (event, callback) => {
                     console.warn('Echo not available - event not listened:', event);

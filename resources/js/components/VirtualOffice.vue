@@ -782,67 +782,144 @@ export default {
 
         const startRecording = async () => {
             try {
-                // Collect all active streams
-                const streamsToRecord = [];
-                
-                // Add local stream if video/audio is enabled
-                if (localStream.value) {
-                    streamsToRecord.push(localStream.value);
+                // Ensure we have a local stream with audio
+                if (!localStream.value) {
+                    await initializeMedia();
                 }
                 
-                // Add remote video streams
-                Object.values(videoStreams.value).forEach(stream => {
-                    if (stream) {
-                        streamsToRecord.push(stream);
-                    }
-                });
-                
-                if (streamsToRecord.length === 0) {
-                    alert('No active streams to record');
+                if (!localStream.value) {
+                    alert('Unable to access camera/microphone. Please check permissions.');
                     return;
                 }
                 
-                // Create a combined stream (for simplicity, we'll record the local stream with audio from all)
-                // In a more advanced implementation, you'd mix multiple streams
+                // Create a combined stream for recording
                 const combinedStream = new MediaStream();
                 
-                // Add all video tracks
-                streamsToRecord.forEach(stream => {
-                    stream.getVideoTracks().forEach(track => {
-                        combinedStream.addTrack(track);
+                // Add local video track if available
+                const localVideoTracks = localStream.value.getVideoTracks();
+                if (localVideoTracks.length > 0) {
+                    localVideoTracks.forEach(track => {
+                        if (track.enabled && track.readyState === 'live') {
+                            // Use clone if available, otherwise use original track
+                            try {
+                                if (track.clone) {
+                                    combinedStream.addTrack(track.clone());
+                                } else {
+                                    combinedStream.addTrack(track);
+                                }
+                            } catch (e) {
+                                // Fallback: use original track
+                                combinedStream.addTrack(track);
+                            }
+                        }
                     });
+                }
+                
+                // Add local audio track (CRITICAL for audio recording)
+                const localAudioTracks = localStream.value.getAudioTracks();
+                if (localAudioTracks.length > 0) {
+                    localAudioTracks.forEach(track => {
+                        if (track.enabled && track.readyState === 'live') {
+                            // Use clone if available, otherwise use original track
+                            try {
+                                if (track.clone) {
+                                    combinedStream.addTrack(track.clone());
+                                } else {
+                                    combinedStream.addTrack(track);
+                                }
+                                console.log('✅ Added local audio track to recording:', track.label, 'enabled:', track.enabled, 'readyState:', track.readyState);
+                            } catch (e) {
+                                console.warn('Failed to add audio track:', e);
+                                // Fallback: use original track
+                                combinedStream.addTrack(track);
+                            }
+                        } else {
+                            console.warn('⚠️ Audio track not ready:', track.label, 'enabled:', track.enabled, 'readyState:', track.readyState);
+                        }
+                    });
+                } else {
+                    console.warn('⚠️ No local audio tracks available for recording');
+                    alert('Warning: No audio tracks found. Recording will be video-only. Please check microphone permissions.');
+                }
+                
+                // Add remote audio tracks from other users
+                Object.entries(videoStreams.value).forEach(([userId, stream]) => {
+                    if (stream && userId !== currentUserId.value) {
+                        const audioTracks = stream.getAudioTracks();
+                        audioTracks.forEach(track => {
+                            if (track.enabled && track.readyState === 'live') {
+                                try {
+                                    if (track.clone) {
+                                        combinedStream.addTrack(track.clone());
+                                    } else {
+                                        combinedStream.addTrack(track);
+                                    }
+                                    console.log('✅ Added remote audio track from user', userId, 'to recording');
+                                } catch (e) {
+                                    combinedStream.addTrack(track);
+                                }
+                            }
+                        });
+                    }
                 });
                 
-                // Add all audio tracks
-                streamsToRecord.forEach(stream => {
-                    stream.getAudioTracks().forEach(track => {
-                        combinedStream.addTrack(track);
-                    });
+                // Verify we have at least one track
+                const totalTracks = combinedStream.getTracks().length;
+                const audioTracks = combinedStream.getAudioTracks().length;
+                const videoTracks = combinedStream.getVideoTracks().length;
+                
+                console.log('📹 Recording tracks:', {
+                    total: totalTracks,
+                    audio: audioTracks,
+                    video: videoTracks
                 });
                 
-                // If no tracks, get user media
-                if (combinedStream.getTracks().length === 0) {
-                    const userMedia = await navigator.mediaDevices.getUserMedia({ 
-                        video: videoEnabled.value, 
-                        audio: true 
-                    });
-                    userMedia.getTracks().forEach(track => combinedStream.addTrack(track));
+                if (totalTracks === 0) {
+                    alert('No active tracks to record. Please enable camera or microphone.');
+                    return;
+                }
+                
+                if (audioTracks === 0) {
+                    console.warn('⚠️ Recording without audio - no audio tracks found');
+                }
+                
+                // Determine best MIME type with audio support
+                // Try formats that explicitly include audio codec (opus)
+                let mimeType = '';
+                const supportedTypes = [
+                    'video/webm;codecs=vp9,opus',  // Best quality
+                    'video/webm;codecs=vp8,opus', // Good quality
+                    'video/webm;codecs=vp9',      // VP9 with default audio
+                    'video/webm;codecs=vp8',      // VP8 with default audio
+                    'video/webm',                 // Basic WebM
+                ];
+                
+                for (const type of supportedTypes) {
+                    if (MediaRecorder.isTypeSupported(type)) {
+                        mimeType = type;
+                        console.log('✅ Selected MIME type:', mimeType);
+                        break;
+                    }
+                }
+                
+                if (!mimeType) {
+                    console.warn('⚠️ No preferred MIME type supported, using browser default');
+                    // Browser will choose default
                 }
                 
                 const options = {
-                    mimeType: 'video/webm;codecs=vp9,opus',
-                    videoBitsPerSecond: 2500000
+                    videoBitsPerSecond: 2500000,
+                    audioBitsPerSecond: 128000 // Ensure audio bitrate
                 };
                 
-                // Fallback to webm if vp9 not supported
-                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                    options.mimeType = 'video/webm;codecs=vp8,opus';
+                // Only set mimeType if we found a supported one
+                if (mimeType) {
+                    options.mimeType = mimeType;
                 }
                 
-                // Final fallback
-                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                    options.mimeType = 'video/webm';
-                }
+                console.log('🎬 Starting recording with:', mimeType || 'browser default');
+                console.log('🎤 Audio tracks in stream:', combinedStream.getAudioTracks().length);
+                console.log('📹 Video tracks in stream:', combinedStream.getVideoTracks().length);
                 
                 recordedChunks.value = [];
                 const recorder = new MediaRecorder(combinedStream, options);
@@ -850,33 +927,56 @@ export default {
                 recorder.ondataavailable = (event) => {
                     if (event.data && event.data.size > 0) {
                         recordedChunks.value.push(event.data);
+                        console.log('📦 Recording chunk received:', event.data.size, 'bytes');
                     }
                 };
                 
                 recorder.onstop = () => {
-                    const blob = new Blob(recordedChunks.value, { type: 'video/webm' });
+                    if (recordedChunks.value.length === 0) {
+                        console.error('❌ No recording data available');
+                        alert('Recording failed: No data captured');
+                        isRecording.value = false;
+                        return;
+                    }
+                    
+                    const finalMimeType = mimeType || 'video/webm';
+                    const blob = new Blob(recordedChunks.value, { type: finalMimeType });
+                    
+                    console.log('✅ Recording complete:', {
+                        size: blob.size,
+                        type: blob.type,
+                        chunks: recordedChunks.value.length
+                    });
+                    
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `recording-${new Date().toISOString()}.webm`;
+                    a.download = `recording-${new Date().toISOString().replace(/:/g, '-')}.${finalMimeType.includes('mp4') ? 'mp4' : 'webm'}`;
                     document.body.appendChild(a);
                     a.click();
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
                     recordedChunks.value = [];
+                    
+                    // Clean up cloned tracks
+                    combinedStream.getTracks().forEach(track => track.stop());
+                    
+                    alert(`Recording saved! ${audioTracks > 0 ? 'Audio included.' : 'Warning: No audio tracks were recorded.'}`);
                 };
                 
                 recorder.onerror = (event) => {
-                    console.error('Recording error:', event);
+                    console.error('❌ Recording error:', event);
                     isRecording.value = false;
-                    alert('Recording error occurred');
+                    alert('Recording error occurred: ' + (event.error?.message || 'Unknown error'));
                 };
                 
                 mediaRecorder.value = recorder;
                 recorder.start(1000); // Collect data every second
                 isRecording.value = true;
+                console.log('🔴 Recording started');
             } catch (error) {
-                console.error('Error starting recording:', error);
+                console.error('❌ Error starting recording:', error);
+                alert('Failed to start recording: ' + error.message);
                 throw error;
             }
         };
@@ -1075,14 +1175,14 @@ export default {
                 await nextTick();
                 
                 try {
-                    // Initialize media with audio only (camera OFF by default)
+                    // Initialize media with audio enabled for communication (camera OFF by default)
                     videoEnabled.value = false;
-                    proximityAudioEnabled.value = false;
-                    audioEnabled.value = false;
+                    audioEnabled.value = true; // Enable audio for communication
+                    proximityAudioEnabled.value = true; // Enable proximity audio
                     await initializeMedia();
                     
-                    // Update presence to reflect camera is OFF by default and audio is OFF
-                    await updatePresence({ video_enabled: false, audio_enabled: false });
+                    // Update presence to reflect camera is OFF by default but audio is ON
+                    await updatePresence({ video_enabled: false, audio_enabled: true });
                     
                     // Set local video stream for video call (if enabled later)
                     if (localStream.value && localVideoRef.value) {
@@ -1104,12 +1204,25 @@ export default {
 
         const initializeMedia = async () => {
             try {
+                // Always request audio for communication, even if audioEnabled is false initially
                 const stream = await navigator.mediaDevices.getUserMedia({
                     video: videoEnabled.value,
-                    audio: audioEnabled.value,
+                    audio: true, // Always request audio for communication
                 });
                 
                 localStream.value = stream;
+                
+                // Ensure audio is enabled if we have audio tracks
+                if (stream.getAudioTracks().length > 0) {
+                    audioEnabled.value = true;
+                    // Enable all audio tracks
+                    stream.getAudioTracks().forEach(track => {
+                        track.enabled = true;
+                    });
+                    console.log('Audio tracks initialized:', stream.getAudioTracks().length, 'tracks');
+                } else {
+                    console.warn('No audio tracks in stream');
+                }
                 
                 // Set videoStreams for current user if video is enabled
                 if (videoEnabled.value && currentUserId.value) {
@@ -1129,15 +1242,35 @@ export default {
                 }
                 
                 // Add stream to all existing peer connections
+                console.log('Adding stream to', Object.keys(peers.value).length, 'peer connections');
                 Object.entries(peers.value).forEach(([userId, peer]) => {
                     if (peer && peer.addTrack) {
                         stream.getTracks().forEach(track => {
                             try {
                                 peer.addTrack(track, stream);
+                                console.log('Added track to peer:', userId, 'kind:', track.kind, 'enabled:', track.enabled);
                             } catch (err) {
-                                // Silently fail - peer might already have track
+                                console.warn('Failed to add track via addTrack:', err);
                             }
                         });
+                    } else if (peer && peer._pc) {
+                        // If addTrack doesn't work, use RTCPeerConnection directly
+                        stream.getTracks().forEach(track => {
+                            try {
+                                const sender = peer._pc.getSenders().find(s => s.track && s.track.kind === track.kind);
+                                if (sender) {
+                                    sender.replaceTrack(track);
+                                    console.log('Replaced track in peer:', userId, 'kind:', track.kind);
+                                } else {
+                                    peer._pc.addTrack(track, stream);
+                                    console.log('Added track to peer via RTCPeerConnection:', userId, 'kind:', track.kind);
+                                }
+                            } catch (err) {
+                                console.warn('Failed to add track to peer connection:', err);
+                            }
+                        });
+                    } else {
+                        console.warn('Peer connection not ready for user:', userId);
                     }
                 });
                 
@@ -1151,7 +1284,7 @@ export default {
                 if (microphones.value.length > 0) selectedMicrophone.value = microphones.value[0].deviceId;
                 if (speakers.value.length > 0) selectedSpeaker.value = speakers.value[0].deviceId;
             } catch (error) {
-
+                console.error('Failed to initialize media:', error);
                 // Don't throw - allow user to continue without media
                 // They can enable it later via settings
             }
@@ -1183,34 +1316,46 @@ export default {
                 retries++;
             }
             
+            // Check if Echo is properly configured (not just a mock)
+            // For self-hosted WebSocket, we don't need VITE_PUSHER_APP_KEY
+            const isEchoConfigured = window.Echo && 
+                window.Echo.private && 
+                !window.Echo._isMock;
+            
             // Listen for WebRTC events
-            if (window.Echo && window.Echo.private) {
+            if (isEchoConfigured) {
                 try {
                     const channel = window.Echo.private(`user.${currentUserId.value}`);
                     if (channel && channel.listen) {
                         channel.listen('.webrtc.offer', (data) => handleOffer(data));
                         channel.listen('.webrtc.answer', (data) => handleAnswer(data));
                         channel.listen('.webrtc.ice-candidate', (data) => handleIceCandidate(data));
+                        console.log('✅ WebRTC listeners set up');
                     }
                 } catch (error) {
-                    
+                    console.error('Failed to setup WebRTC listeners:', error);
                 }
             } else {
+                console.warn('⚠️ Echo not configured - WebRTC signaling will not work. Audio/video communication requires Pusher configuration.');
+                console.warn('💡 To enable real-time audio/video, add VITE_PUSHER_APP_KEY to your .env file');
+            }
 
+            // Ensure media is initialized before creating peer connections
+            if (!localStream.value) {
+                try {
+                    await initializeMedia();
+                } catch (error) {
+                    console.error('Failed to initialize media for WebRTC:', error);
+                }
             }
 
             // Create peer connections for ALL existing users in the room
-
-            presences.value.forEach(presence => {
+            for (const presence of presences.value) {
                 if (presence.user_id !== currentUserId.value && !peers.value[presence.user_id]) {
-
-                    createPeer(presence.user_id, true);
-                } else if (presence.user_id === currentUserId.value) {
-
-                } else {
-
+                    console.log('Creating peer connection for user:', presence.user_id);
+                    await createPeer(presence.user_id, true);
                 }
-            });
+            }
         };
 
         // Calculate distance between two presences
@@ -1251,12 +1396,8 @@ export default {
                     parseFloat(presence.position_y) || 0
                 );
                 
-                // If current user has global audio ON, everyone hears at full volume
-                if (proximityAudioEnabled.value) {
-                    audioElement.volume = maxVolume;
-                } 
                 // If current user has proximity audio ON, use distance-based volume
-                else if (proximityAudioEnabled.value) {
+                if (proximityAudioEnabled.value) {
                     const volume = distance > maxDistance 
                         ? 0 
                         : maxVolume - ((distance / maxDistance) * (maxVolume - minVolume));
@@ -1269,16 +1410,33 @@ export default {
             });
         };
 
-        const createPeer = (userId, initiator) => {
+        const createPeer = async (userId, initiator) => {
             // Don't create duplicate peers
             if (peers.value[userId]) {
-
                 return;
             }
-
-
             
             try {
+                // Always ensure we have audio enabled for communication
+                if (!localStream.value) {
+                    // Initialize media if not already done (always request audio)
+                    console.log('No local stream, initializing media for peer:', userId);
+                    try {
+                        await initializeMedia();
+                    } catch (error) {
+                        console.error('Failed to initialize media for peer:', error);
+                        return;
+                    }
+                    // Retry creating peer after media is initialized
+                    if (!peers.value[userId] && localStream.value) {
+                        return createPeer(userId, initiator);
+                    }
+                    if (!localStream.value) {
+                        console.warn('Failed to initialize media for peer:', userId);
+                        return;
+                    }
+                }
+                
                 // Ensure iceServers is properly formatted
                 const peerConfig = {
                     initiator,
@@ -1291,7 +1449,32 @@ export default {
                     },
                 };
                 
+                console.log('Creating peer with stream:', localStream.value ? 'has stream' : 'no stream', 'audio tracks:', localStream.value?.getAudioTracks().length || 0);
                 const peer = new SimplePeer(peerConfig);
+                
+                // If stream is added later, add tracks to this peer
+                if (!localStream.value) {
+                    const checkStream = setInterval(() => {
+                        if (localStream.value && peer) {
+                            console.log('Adding tracks to peer:', userId, 'audio:', localStream.value.getAudioTracks().length);
+                            localStream.value.getTracks().forEach(track => {
+                                try {
+                                    if (peer.addTrack) {
+                                        peer.addTrack(track, localStream.value);
+                                    } else if (peer._pc) {
+                                        peer._pc.addTrack(track, localStream.value);
+                                    }
+                                } catch (err) {
+                                    console.warn('Failed to add track to peer:', err);
+                                }
+                            });
+                            clearInterval(checkStream);
+                        }
+                    }, 500);
+                    
+                    // Clear interval after 10 seconds
+                    setTimeout(() => clearInterval(checkStream), 10000);
+                }
 
                 peer.on('signal', (data) => {
 
@@ -1303,8 +1486,50 @@ export default {
                 });
 
                 peer.on('stream', (stream) => {
+                    console.log('📡 Stream received from user:', userId, 'Video tracks:', stream.getVideoTracks().length, 'Audio tracks:', stream.getAudioTracks().length);
+                    
                     // Check if it's a screen share or video stream
                     const videoTracks = stream.getVideoTracks();
+                    const audioTracks = stream.getAudioTracks();
+                    
+                    // ALWAYS handle audio tracks first - they're critical for communication
+                    // videoRefs is used for audio playback (proximity audio)
+                    if (audioTracks.length > 0) {
+                        console.log('🎵 Processing audio tracks for user:', userId);
+                        nextTick(() => {
+                            const audioElement = videoRefs.value[userId];
+                            if (audioElement) {
+                                // Create a new MediaStream with just the audio tracks
+                                const audioOnlyStream = new MediaStream();
+                                audioTracks.forEach((track, index) => {
+                                    audioOnlyStream.addTrack(track);
+                                    console.log(`🎵 Added audio track ${index} for user ${userId}:`, track.label, 'enabled:', track.enabled);
+                                });
+                                audioElement.srcObject = audioOnlyStream;
+                                audioElement.volume = 0.5;
+                                audioElement.play().then(() => {
+                                    console.log('✅ Audio playing for user:', userId);
+                                }).catch(err => {
+                                    console.error('❌ Audio play failed for user:', userId, err);
+                                    // Retry after a short delay
+                                    setTimeout(() => {
+                                        if (audioElement.srcObject) {
+                                            audioElement.play().then(() => {
+                                                console.log('✅ Audio play retry successful for user:', userId);
+                                            }).catch(e => console.error('❌ Audio play retry failed for user:', userId, e));
+                                        }
+                                    }, 500);
+                                });
+                                console.log('✅ Audio stream set for user:', userId);
+                            } else {
+                                console.error('❌ Audio element not found for user:', userId, 'videoRefs keys:', Object.keys(videoRefs.value));
+                            }
+                            updateProximityAudio();
+                        });
+                    } else {
+                        console.warn('⚠️ No audio tracks in stream from user:', userId);
+                    }
+                    
                     if (videoTracks.length > 0 && videoTracks[0].label.toLowerCase().includes('screen')) {
                         screenStreams.value[userId] = stream;
                         nextTick(() => {
@@ -1312,7 +1537,7 @@ export default {
                                 screenRefs.value[userId].srcObject = stream;
                             }
                         });
-                    } else {
+                    } else if (videoTracks.length > 0) {
                         videoStreams.value[userId] = stream;
                         console.log('Remote video stream received for user:', userId);
                         // Show panel if not already visible
@@ -1320,11 +1545,7 @@ export default {
                             showVideoPanel.value = true;
                         }
                         nextTick(() => {
-                            if (videoRefs.value[userId]) {
-                                videoRefs.value[userId].srcObject = stream;
-                                videoRefs.value[userId].volume = 0.5; // Initial volume
-                            }
-                            // Update video panel
+                            // Video goes to video panel, NOT to videoRefs (which is for audio)
                             const remoteKey = `${userId}-remote`;
                             const panelEl = videoPanelRefs.value[remoteKey];
                             if (panelEl) {
@@ -1421,20 +1642,24 @@ export default {
 
         const sendAnswer = async (userId, answer) => {
             try {
+                console.log('📤 Sending WebRTC answer to user:', userId);
                 await axios.post(`/api/webrtc/rooms/${props.roomId}/answer`, {
                     target_user_id: userId,
                     answer: answer,
                 });
+                console.log('✅ WebRTC answer sent successfully to user:', userId);
             } catch (error) {
-                
+                console.error('❌ Failed to send WebRTC answer to user:', userId, error);
             }
         };
 
         const handleOffer = async (data) => {
             if (!peers.value[data.from_user_id]) {
-                createPeer(data.from_user_id, false);
+                await createPeer(data.from_user_id, false);
             }
-            peers.value[data.from_user_id].signal(JSON.parse(data.offer));
+            if (peers.value[data.from_user_id]) {
+                peers.value[data.from_user_id].signal(JSON.parse(data.offer));
+            }
         };
 
         const handleAnswer = (data) => {
@@ -1450,18 +1675,29 @@ export default {
         };
 
         let lastPresenceUpdate = 0;
+        let lastPositionUpdate = 0;
         const PRESENCE_UPDATE_THROTTLE = 2000; // Minimum 2 seconds between updates
+        const POSITION_UPDATE_THROTTLE = 200; // 200ms for position updates (more frequent for real-time movement)
         
-        const updatePresence = async (updates) => {
+        const updatePresence = async (updates, isPositionUpdate = false) => {
             const now = Date.now();
-            if (now - lastPresenceUpdate < PRESENCE_UPDATE_THROTTLE) {
+            const throttle = isPositionUpdate ? POSITION_UPDATE_THROTTLE : PRESENCE_UPDATE_THROTTLE;
+            const lastUpdate = isPositionUpdate ? lastPositionUpdate : lastPresenceUpdate;
+            
+            if (now - lastUpdate < throttle) {
                 // Throttle updates to prevent rate limiting
                 return;
             }
             
             try {
-                lastPresenceUpdate = now;
-                await axios.put(`/api/virtual-office/rooms/${props.roomId}/presence`, updates);
+                if (isPositionUpdate) {
+                    lastPositionUpdate = now;
+                    console.log('Sending position update:', updates);
+                } else {
+                    lastPresenceUpdate = now;
+                }
+                const response = await axios.put(`/api/virtual-office/rooms/${props.roomId}/presence`, updates);
+                console.log('Presence update sent successfully:', response.data);
                 
                 // Update local presence
                 const currentPresenceIndex = presences.value.findIndex(p => p.user_id === currentUserId.value);
@@ -1469,12 +1705,16 @@ export default {
                     Object.assign(presences.value[currentPresenceIndex], updates);
                 }
             } catch (error) {
+                console.error('Failed to update presence:', error);
                 // Handle rate limiting gracefully
                 if (error.response?.status === 429) {
                     // Rate limited - increase throttle temporarily
-                    lastPresenceUpdate = now + 10000; // Wait 10 seconds before next update
+                    if (isPositionUpdate) {
+                        lastPositionUpdate = now + 1000; // Wait 1 second before next position update
+                    } else {
+                        lastPresenceUpdate = now + 10000; // Wait 10 seconds before next update
+                    }
                 }
-                // Silently fail for other errors
             }
         };
 
@@ -1483,9 +1723,34 @@ export default {
             audioEnabled.value = proximityAudioEnabled.value;
             
             if (localStream.value) {
-                localStream.value.getAudioTracks().forEach(track => {
-                    track.enabled = audioEnabled.value;
-                });
+                const audioTracks = localStream.value.getAudioTracks();
+                if (audioTracks.length > 0) {
+                    audioTracks.forEach(track => {
+                        track.enabled = audioEnabled.value;
+                    });
+                } else if (audioEnabled.value) {
+                    // No audio tracks in stream, need to add them
+                    try {
+                        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        audioStream.getAudioTracks().forEach(track => {
+                            localStream.value.addTrack(track);
+                            // Add track to all existing peer connections
+                            Object.values(peers.value).forEach(peer => {
+                                if (peer && peer.addTrack) {
+                                    try {
+                                        peer.addTrack(track, localStream.value);
+                                    } catch (err) {
+                                        console.warn('Failed to add audio track to peer:', err);
+                                    }
+                                }
+                            });
+                        });
+                    } catch (error) {
+                        console.error('Failed to get audio stream:', error);
+                        audioEnabled.value = false;
+                        proximityAudioEnabled.value = false;
+                    }
+                }
                 
                 // Update all peer connections with the new audio track state
                 Object.values(peers.value).forEach(peer => {
@@ -1502,6 +1767,20 @@ export default {
                 // If stream doesn't exist and we're enabling audio, get new stream
                 try {
                     await initializeMedia();
+                    // After initializing, add stream to all existing peers
+                    if (localStream.value) {
+                        Object.entries(peers.value).forEach(([userId, peer]) => {
+                            if (peer && peer.addTrack && localStream.value) {
+                                localStream.value.getTracks().forEach(track => {
+                                    try {
+                                        peer.addTrack(track, localStream.value);
+                                    } catch (err) {
+                                        console.warn('Failed to add track to peer:', err);
+                                    }
+                                });
+                            }
+                        });
+                    }
                 } catch (error) {
                     console.error('Failed to initialize proximity audio:', error);
                     proximityAudioEnabled.value = false;
@@ -1719,7 +1998,7 @@ export default {
                 const rect = canvasRef.value.getBoundingClientRect();
                 const x = (event.clientX - rect.left) / zoomLevel.value;
                 const y = (event.clientY - rect.top) / zoomLevel.value;
-                updatePresence({ position_x: x, position_y: y });
+                updatePresence({ position_x: x, position_y: y }, true);
             }
         };
 
@@ -1875,6 +2154,9 @@ export default {
             if (currentPresence) {
                 currentPresence.position_x = newX;
                 currentPresence.position_y = newY;
+                
+                // Send position update to server in real-time (throttled)
+                updatePresence({ position_x: newX, position_y: newY }, true);
             }
         };
 
@@ -1888,7 +2170,7 @@ export default {
                     await updatePresence({
                         position_x: currentPresence.position_x,
                         position_y: currentPresence.position_y
-                    });
+                    }, true);
                 }
                 
                 draggingUserId.value = null;
@@ -2320,10 +2602,16 @@ export default {
                 try {
                     await setupWebRTC();
                 } catch (webrtcError) {
+                    console.error('WebRTC setup failed:', webrtcError);
                     // Continue without WebRTC
                 }
 
-                await loadChatMessages();
+                try {
+                    await loadChatMessages();
+                } catch (chatError) {
+                    console.warn('Chat messages failed to load (non-critical):', chatError);
+                    // Continue without chat - not critical for audio/position
+                }
             } catch (err) {
                 if (!err.message || (!err.message.includes('SimplePeer') && !err.message.includes('WebRTC'))) {
                     error.value = err.message || 'Failed to initialize Virtual Office';
@@ -2338,18 +2626,38 @@ export default {
                 retries++;
             }
             
-            if (window.Echo && window.Echo.private) {
+            // Check if Echo is properly configured (not just a mock)
+            const isEchoConfigured = window.Echo && 
+                window.Echo.private && 
+                !window.Echo._isMock;
+            
+            if (isEchoConfigured) {
                 try {
+                    console.log('📡 Setting up Echo channel for room:', props.roomId);
                     const channel = window.Echo.private(`room.${props.roomId}`);
                     if (channel && channel.listen) {
-                        channel.listen('.user.joined', (data) => {
+                        console.log('✅ Echo channel ready, setting up listeners');
+                        
+                        // Test connection
+                        channel.here((users) => {
+                            console.log('✅ Connected to WebSocket channel, users online:', users.length);
+                        });
+                        
+                        channel.joining((user) => {
+                            console.log('👋 User joining:', user);
+                        });
+                        
+                        channel.leaving((user) => {
+                            console.log('👋 User leaving:', user);
+                        });
+                        channel.listen('.user.joined', async (data) => {
                             console.log('User joined:', data.presence.user_id, 'video_enabled:', data.presence.video_enabled);
                             const existingIndex = presences.value.findIndex(p => p.user_id === data.presence.user_id);
                             if (existingIndex === -1) {
                                 // New user joined
                                 presences.value.push(data.presence);
                                 if (data.presence.user_id !== currentUserId.value && !peers.value[data.presence.user_id]) {
-                                    createPeer(data.presence.user_id, true);
+                                    await createPeer(data.presence.user_id, true);
                                 }
                                 // If new user has video enabled, show panel
                                 if (data.presence.video_enabled && data.presence.user_id !== currentUserId.value && !showVideoPanel.value) {
@@ -2397,11 +2705,36 @@ export default {
                             });
                         });
                         channel.listen('.presence.updated', (data) => {
+                            console.log('🔔 Presence updated event received:', data.presence.user_id, 'position:', data.presence.position_x, data.presence.position_y);
                             const index = presences.value.findIndex(p => p.user_id === data.presence.user_id);
                             const oldPresence = index !== -1 ? { ...presences.value[index] } : null;
                             
                             if (index !== -1) {
-                                presences.value[index] = data.presence;
+                                // Update position values explicitly to ensure reactivity
+                                const oldPositionX = presences.value[index].position_x;
+                                const oldPositionY = presences.value[index].position_y;
+                                const newPositionX = data.presence.position_x !== undefined ? parseFloat(data.presence.position_x) : oldPositionX;
+                                const newPositionY = data.presence.position_y !== undefined ? parseFloat(data.presence.position_y) : oldPositionY;
+                                
+                                // Check if position actually changed
+                                const positionChanged = (newPositionX !== oldPositionX || newPositionY !== oldPositionY);
+                                
+                                if (positionChanged) {
+                                    console.log('📍 Position changed for user:', data.presence.user_id, 'from', oldPositionX, oldPositionY, 'to', newPositionX, newPositionY);
+                                }
+                                
+                                // Create a completely new object to ensure Vue reactivity
+                                const updatedPresence = {
+                                    ...presences.value[index],
+                                    ...data.presence,
+                                    position_x: newPositionX,
+                                    position_y: newPositionY
+                                };
+                                
+                                // Replace the entire object in the array to trigger reactivity
+                                presences.value.splice(index, 1, updatedPresence);
+                                
+                                console.log('✅ Position updated in UI for user:', data.presence.user_id);
                                 
                                 // Check if video_enabled changed
                                 if (oldPresence && oldPresence.video_enabled !== data.presence.video_enabled) {
@@ -2431,7 +2764,7 @@ export default {
                                 }
                             } else {
                                 // Presence not found, add it
-                                presences.value.push(data.presence);
+                                presences.value.push({ ...data.presence });
                                 // If new user has video enabled, show panel
                                 if (data.presence.video_enabled && data.presence.user_id !== currentUserId.value && !showVideoPanel.value) {
                                     showVideoPanel.value = true;
@@ -2450,10 +2783,46 @@ export default {
 
                     }
                 } catch (error) {
-                    
+                    console.error('Failed to setup Echo listeners:', error);
                 }
             } else {
-
+                console.warn('⚠️ Echo not configured - using polling fallback for position updates');
+                // Poll for presence updates every 500ms when Echo is not available
+                const pollPresences = async () => {
+                    try {
+                        const response = await axios.get(`/api/virtual-office/rooms/${props.roomId}/presences`);
+                        if (response.data && Array.isArray(response.data)) {
+                            response.data.forEach(serverPresence => {
+                                if (serverPresence.user_id !== currentUserId.value) {
+                                    const index = presences.value.findIndex(p => p.user_id === serverPresence.user_id);
+                                    if (index !== -1) {
+                                        const oldPositionX = presences.value[index].position_x;
+                                        const oldPositionY = presences.value[index].position_y;
+                                        const newPositionX = parseFloat(serverPresence.position_x) || oldPositionX;
+                                        const newPositionY = parseFloat(serverPresence.position_y) || oldPositionY;
+                                        
+                                        if (newPositionX !== oldPositionX || newPositionY !== oldPositionY) {
+                                            console.log('📍 Position updated via polling for user:', serverPresence.user_id, 'to', newPositionX, newPositionY);
+                                            const updatedPresence = {
+                                                ...presences.value[index],
+                                                ...serverPresence,
+                                                position_x: newPositionX,
+                                                position_y: newPositionY
+                                            };
+                                            presences.value.splice(index, 1, updatedPresence);
+                                            updateProximityAudio();
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    } catch (error) {
+                        console.error('Failed to poll presences:', error);
+                    }
+                };
+                
+                // Poll every 500ms for real-time updates
+                setInterval(pollPresences, 500);
             }
 
             // Update presence periodically
