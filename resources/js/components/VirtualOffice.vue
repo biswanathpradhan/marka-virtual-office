@@ -1314,6 +1314,11 @@ export default {
                         });
                     } else {
                         videoStreams.value[userId] = stream;
+                        console.log('Remote video stream received for user:', userId);
+                        // Show panel if not already visible
+                        if (!showVideoPanel.value) {
+                            showVideoPanel.value = true;
+                        }
                         nextTick(() => {
                             if (videoRefs.value[userId]) {
                                 videoRefs.value[userId].srcObject = stream;
@@ -1324,6 +1329,14 @@ export default {
                             const panelEl = videoPanelRefs.value[remoteKey];
                             if (panelEl) {
                                 updateVideoPanelStream(panelEl, userId, 'remote');
+                            } else {
+                                // Element might not exist yet, wait a bit and try again
+                                setTimeout(() => {
+                                    const el = videoPanelRefs.value[remoteKey];
+                                    if (el) {
+                                        updateVideoPanelStream(el, userId, 'remote');
+                                    }
+                                }, 500);
                             }
                             updateProximityAudio();
                         });
@@ -1664,6 +1677,13 @@ export default {
                         const videoEl = videoRefs.value[currentUserId.value];
                         if (videoEl) {
                             videoEl.srcObject = null;
+                        }
+                        
+                        // Clear video panel
+                        const localKey = `${currentUserId.value}-local`;
+                        const panelEl = videoPanelRefs.value[localKey];
+                        if (panelEl && panelEl.srcObject) {
+                            panelEl.srcObject = null;
                         }
                         
                         // Update all peer connections
@@ -2323,36 +2343,88 @@ export default {
                     const channel = window.Echo.private(`room.${props.roomId}`);
                     if (channel && channel.listen) {
                         channel.listen('.user.joined', (data) => {
-
+                            console.log('User joined:', data.presence.user_id, 'video_enabled:', data.presence.video_enabled);
                             const existingIndex = presences.value.findIndex(p => p.user_id === data.presence.user_id);
                             if (existingIndex === -1) {
                                 // New user joined
                                 presences.value.push(data.presence);
                                 if (data.presence.user_id !== currentUserId.value && !peers.value[data.presence.user_id]) {
-
                                     createPeer(data.presence.user_id, true);
+                                }
+                                // If new user has video enabled, show panel
+                                if (data.presence.video_enabled && data.presence.user_id !== currentUserId.value && !showVideoPanel.value) {
+                                    showVideoPanel.value = true;
                                 }
                             } else {
                                 // User already exists, update their presence
                                 presences.value[existingIndex] = data.presence;
                             }
+                            // Force Vue to update
+                            nextTick(() => {
+                                // Video panel will update automatically via watchers
+                            });
                         });
                         channel.listen('.user.left', (data) => {
-
-                            presences.value = presences.value.filter(p => p.user_id !== data.presence?.user_id && p.user_id !== data.user_id);
-                            if (peers.value[data.presence?.user_id || data.user_id]) {
-                                const userId = data.presence?.user_id || data.user_id;
+                            console.log('User left:', data.presence?.user_id || data.user_id);
+                            const userId = data.presence?.user_id || data.user_id;
+                            
+                            // Remove from presences
+                            presences.value = presences.value.filter(p => p.user_id !== userId);
+                            
+                            // Clean up peer connections
+                            if (peers.value[userId]) {
                                 peers.value[userId].destroy();
                                 delete peers.value[userId];
-                                delete videoStreams.value[userId];
-                                delete screenStreams.value[userId];
                             }
+                            
+                            // Clean up video streams
+                            delete videoStreams.value[userId];
+                            delete screenStreams.value[userId];
+                            
+                            // Clean up video panel refs
+                            const remoteKey = `${userId}-remote`;
+                            if (videoPanelRefs.value[remoteKey]) {
+                                const el = videoPanelRefs.value[remoteKey];
+                                if (el && el.srcObject) {
+                                    el.srcObject = null;
+                                }
+                                delete videoPanelRefs.value[remoteKey];
+                            }
+                            
+                            // Force Vue to update
+                            nextTick(() => {
+                                // Video panel will update automatically
+                            });
                         });
                         channel.listen('.presence.updated', (data) => {
-
                             const index = presences.value.findIndex(p => p.user_id === data.presence.user_id);
+                            const oldPresence = index !== -1 ? { ...presences.value[index] } : null;
+                            
                             if (index !== -1) {
                                 presences.value[index] = data.presence;
+                                
+                                // Check if video_enabled changed
+                                if (oldPresence && oldPresence.video_enabled !== data.presence.video_enabled) {
+                                    console.log('User video state changed:', data.presence.user_id, 'video_enabled:', data.presence.video_enabled);
+                                    
+                                    if (!data.presence.video_enabled) {
+                                        // Camera turned off - clean up
+                                        delete videoStreams.value[data.presence.user_id];
+                                        const remoteKey = `${data.presence.user_id}-remote`;
+                                        if (videoPanelRefs.value[remoteKey]) {
+                                            const el = videoPanelRefs.value[remoteKey];
+                                            if (el && el.srcObject) {
+                                                el.srcObject = null;
+                                            }
+                                        }
+                                    } else {
+                                        // Camera turned on - show panel if not already visible
+                                        if (data.presence.user_id !== currentUserId.value && !showVideoPanel.value) {
+                                            showVideoPanel.value = true;
+                                        }
+                                    }
+                                }
+                                
                                 // Update proximity audio when presence position changes
                                 if (data.presence.position_x !== undefined || data.presence.position_y !== undefined) {
                                     updateProximityAudio();
@@ -2360,7 +2432,16 @@ export default {
                             } else {
                                 // Presence not found, add it
                                 presences.value.push(data.presence);
+                                // If new user has video enabled, show panel
+                                if (data.presence.video_enabled && data.presence.user_id !== currentUserId.value && !showVideoPanel.value) {
+                                    showVideoPanel.value = true;
+                                }
                             }
+                            
+                            // Force Vue to update
+                            nextTick(() => {
+                                // Video panel will update automatically via watchers
+                            });
                         });
                         channel.listen('.message.sent', (data) => {
                             chatMessages.value.push(data.message);
@@ -2499,19 +2580,77 @@ export default {
         }, { immediate: true });
 
         // Watch for remote video streams
-        watch(() => videoStreams.value, () => {
+        watch(() => videoStreams.value, (newStreams, oldStreams) => {
             nextTick(() => {
-                Object.keys(videoStreams.value).forEach(userId => {
+                // Update existing streams
+                Object.keys(newStreams).forEach(userId => {
                     if (userId !== currentUserId.value) {
                         const remoteKey = `${userId}-remote`;
                         const el = videoPanelRefs.value[remoteKey];
-                        if (el && videoStreams.value[userId]) {
+                        if (el && newStreams[userId]) {
                             updateVideoPanelStream(el, userId, 'remote');
                         }
                     }
                 });
+                
+                // Clean up removed streams
+                if (oldStreams) {
+                    Object.keys(oldStreams).forEach(userId => {
+                        if (userId !== currentUserId.value && !newStreams[userId]) {
+                            const remoteKey = `${userId}-remote`;
+                            const el = videoPanelRefs.value[remoteKey];
+                            if (el && el.srcObject) {
+                                el.srcObject = null;
+                            }
+                        }
+                    });
+                }
             });
         }, { deep: true, immediate: true });
+
+        // Watch for presences changes to update video panel in real-time
+        watch(() => presences.value, (newPresences, oldPresences) => {
+            nextTick(() => {
+                // Check for users who turned on/off their camera
+                newPresences.forEach(presence => {
+                    if (presence.user_id !== currentUserId.value) {
+                        // If user has video enabled but no stream yet, wait for it
+                        if (presence.video_enabled && !videoStreams.value[presence.user_id]) {
+                            // Stream will be set when received via WebRTC
+                            console.log('Waiting for video stream from user:', presence.user_id);
+                        }
+                        // If user turned off video, clean up
+                        else if (!presence.video_enabled && videoStreams.value[presence.user_id]) {
+                            console.log('User turned off video:', presence.user_id);
+                            delete videoStreams.value[presence.user_id];
+                            const remoteKey = `${presence.user_id}-remote`;
+                            const el = videoPanelRefs.value[remoteKey];
+                            if (el && el.srcObject) {
+                                el.srcObject = null;
+                            }
+                        }
+                    }
+                });
+                
+                // Check for users who left
+                if (oldPresences) {
+                    oldPresences.forEach(oldPresence => {
+                        const stillExists = newPresences.find(p => p.user_id === oldPresence.user_id);
+                        if (!stillExists && oldPresence.user_id !== currentUserId.value) {
+                            // User left - clean up
+                            console.log('User left, cleaning up:', oldPresence.user_id);
+                            delete videoStreams.value[oldPresence.user_id];
+                            const remoteKey = `${oldPresence.user_id}-remote`;
+                            const el = videoPanelRefs.value[remoteKey];
+                            if (el && el.srcObject) {
+                                el.srcObject = null;
+                            }
+                            delete videoPanelRefs.value[remoteKey];
+                        }
+                    });
+                }
+            });
+        }, { deep: true });
 
         onUnmounted(() => {
             // Remove event listeners
