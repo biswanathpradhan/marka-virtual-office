@@ -9,8 +9,9 @@ const WebSocket = require('ws');
 const http = require('http');
 const url = require('url');
 
-const PORT = 6001;
-const HOST = '0.0.0.0'; // Listen on all interfaces
+// Allow configuration via environment variables for production
+const PORT = process.env.WEBSOCKET_PORT || process.env.PUSHER_PORT || 6001;
+const HOST = process.env.WEBSOCKET_HOST || '0.0.0.0'; // Listen on all interfaces
 
 // Store channels and their subscribers
 const channels = new Map(); // channelName -> Set of clientIds
@@ -74,11 +75,14 @@ const server = http.createServer((req, res) => {
     res.end('Not Found');
 });
 
-// Create WebSocket server
+// Create WebSocket server (accept all paths - Pusher uses /app/{key})
 const wss = new WebSocket.Server({ 
     server,
+    // No path restriction - handle all WebSocket connections
     verifyClient: (info) => {
         // Allow all connections (Laravel will handle auth)
+        const path = info.req.url || '';
+        console.log(`[${new Date().toISOString()}] WebSocket connection attempt: ${path}`);
         return true;
     }
 });
@@ -88,28 +92,50 @@ const clients = new Map(); // clientId -> { ws, channel, connectedAt, subscribed
 
 // Handle WebSocket connections
 wss.on('connection', (ws, req) => {
-    const parsedUrl = url.parse(req.url, true);
-    const channel = parsedUrl.pathname; // e.g., /app/local-key
+    const parsedUrl = url.parse(req.url || '/', true);
+    const path = parsedUrl.pathname || '/'; // e.g., /app/local-key
     
-    console.log(`[${new Date().toISOString()}] Client connected: ${channel}`);
+    console.log(`[${new Date().toISOString()}] ✅ Client connected: ${path}`);
     
     // Store client info
     const clientId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     clients.set(clientId, { 
         ws, 
-        channel, 
+        channel: path, 
         connectedAt: new Date(),
         subscribedChannels: new Set()
     });
     
-    // Send connection confirmation (Pusher protocol)
-    ws.send(JSON.stringify({
-        event: 'pusher:connection_established',
-        data: JSON.stringify({
-            socket_id: clientId,
-            activity_timeout: 30
-        })
-    }));
+    // Wait for WebSocket to be ready, then send connection confirmation (Pusher protocol)
+    const sendConnectionEstablished = () => {
+        try {
+            if (ws.readyState === WebSocket.OPEN) {
+                const connectionMsg = JSON.stringify({
+                    event: 'pusher:connection_established',
+                    data: JSON.stringify({
+                        socket_id: clientId,
+                        activity_timeout: 30
+                    })
+                });
+                ws.send(connectionMsg);
+                console.log(`[${new Date().toISOString()}] ✅ Sent connection_established to client ${clientId}`);
+            } else {
+                // Wait a bit and retry
+                setTimeout(sendConnectionEstablished, 10);
+            }
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] ❌ Error sending connection_established:`, error);
+        }
+    };
+    
+    // Send immediately or wait for ready
+    if (ws.readyState === WebSocket.OPEN) {
+        sendConnectionEstablished();
+    } else {
+        ws.on('open', sendConnectionEstablished);
+        // Also try after a short delay
+        setTimeout(sendConnectionEstablished, 10);
+    }
     
     // Handle incoming messages
     ws.on('message', (message) => {
@@ -118,8 +144,30 @@ wss.on('connection', (ws, req) => {
             
             // Handle Pusher protocol messages
             if (data.event === 'pusher:subscribe') {
-                const channelName = data.channel;
-                console.log(`[${new Date().toISOString()}] Client ${clientId} subscribed to: ${channelName}`);
+                // Extract channel name - Laravel Echo sends it in data.data.channel for private channels
+                // or directly in data.channel for public channels
+                let channelName = data.channel;
+                if (!channelName && data.data) {
+                    // Try to parse data.data if it's a string
+                    if (typeof data.data === 'string') {
+                        try {
+                            const parsedData = JSON.parse(data.data);
+                            channelName = parsedData.channel;
+                        } catch (e) {
+                            // If parsing fails, data.data might be the channel name itself
+                            channelName = data.data;
+                        }
+                    } else if (data.data.channel) {
+                        channelName = data.data.channel;
+                    }
+                }
+                
+                if (!channelName) {
+                    console.error(`[${new Date().toISOString()}] ❌ No channel name found in subscription:`, JSON.stringify(data));
+                    return;
+                }
+                
+                console.log(`[${new Date().toISOString()}] 📡 Client ${clientId} subscribed to: ${channelName}`);
                 
                 // Add to channel subscribers
                 if (!channels.has(channelName)) {
@@ -133,13 +181,33 @@ wss.on('connection', (ws, req) => {
                     client.subscribedChannels.add(channelName);
                 }
                 
-                // Confirm subscription
-                ws.send(JSON.stringify({
-                    event: 'pusher_internal:subscription_succeeded',
-                    channel: channelName
-                }));
+                // Confirm subscription (Pusher protocol)
+                try {
+                    ws.send(JSON.stringify({
+                        event: 'pusher_internal:subscription_succeeded',
+                        channel: channelName
+                    }));
+                    console.log(`[${new Date().toISOString()}] ✅ Subscription confirmed for ${channelName}`);
+                } catch (error) {
+                    console.error(`[${new Date().toISOString()}] ❌ Error confirming subscription:`, error);
+                }
             } else if (data.event === 'pusher:unsubscribe') {
-                const channelName = data.channel;
+                // Extract channel name same way as subscribe
+                let channelName = data.channel;
+                if (!channelName && data.data) {
+                    if (typeof data.data === 'string') {
+                        try {
+                            const parsedData = JSON.parse(data.data);
+                            channelName = parsedData.channel || parsedData;
+                        } catch (e) {
+                            channelName = data.data;
+                        }
+                    } else if (typeof data.data === 'object' && data.data.channel) {
+                        channelName = data.data.channel;
+                    } else if (typeof data.data === 'string') {
+                        channelName = data.data;
+                    }
+                }
                 console.log(`[${new Date().toISOString()}] Client ${clientId} unsubscribed from: ${channelName}`);
                 
                 // Remove from channel subscribers
@@ -222,7 +290,12 @@ server.listen(PORT, HOST, () => {
 server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {
         console.error(`❌ Port ${PORT} is already in use!`);
-        console.error(`   Please stop the other service or change PORT in websocket-server.cjs`);
+        console.error(`   The WebSocket server might already be running.`);
+        console.error(`   Solutions:`);
+        console.error(`   1. Check if another instance is running: netstat -ano | findstr :${PORT}`);
+        console.error(`   2. Kill the process: taskkill /PID [PID] /F`);
+        console.error(`   3. Or use a different port by setting WEBSOCKET_PORT environment variable`);
+        console.error(`   4. Run kill-websocket.bat to automatically kill processes on port ${PORT}`);
     } else {
         console.error('❌ Server error:', error);
     }

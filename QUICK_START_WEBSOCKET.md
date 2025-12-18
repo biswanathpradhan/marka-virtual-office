@@ -4,6 +4,8 @@
 
 The WebSocket server is **REQUIRED** for real-time audio and video communication.
 
+**Important:** Once set up with a process manager (PM2/systemd), the WebSocket server runs continuously in the background. You don't need to start it every time - it runs automatically!
+
 ### Option 1: Double-click (Easiest)
 1. Double-click `START_WEBSOCKET.bat` in your project folder
 2. Keep the window open while using the app

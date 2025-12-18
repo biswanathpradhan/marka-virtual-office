@@ -22,6 +22,7 @@ class WebRTCOffer implements ShouldBroadcast
 
     public function broadcastOn(): Channel
     {
+        // Use public channel - API endpoint already authenticates the sender
         return new Channel('user.' . $this->toUserId);
     }
 

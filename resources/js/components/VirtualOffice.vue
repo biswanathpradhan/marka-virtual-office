@@ -10,7 +10,7 @@
             <div class="error-content">
                 <h2>Error</h2>
                 <p>{{ error }}</p>
-                <button @click="window.location.href = '/rooms'" class="btn-primary">Go Back to Rooms</button>
+                <button @click="goBackToRooms" class="btn-primary">Go Back to Rooms</button>
             </div>
         </div>
         <div v-else class="office-content" :class="{ 'has-video-panel': hasActiveCameras }">
@@ -39,6 +39,9 @@
                 @mousemove="handlePanMove" 
                 @mouseup="handlePanEnd" 
                 @mouseleave="handlePanEnd"
+                @touchstart="handleTouchStart"
+                @touchmove="handleTouchMove"
+                @touchend="handleTouchEnd"
                 :style="{ 
                     transform: `scale(${zoomLevel}) translate(${panX}px, ${panY}px)`, 
                     transformOrigin: '0 0',
@@ -50,6 +53,17 @@
                     height: '3000px'
                 }">
                 <div class="workspace-grid"></div>
+                
+                <!-- Hidden audio elements for all users (for proximity audio) -->
+                <audio
+                    v-for="presence in presences.filter(p => p.user_id !== currentUserId)"
+                    :key="`audio-${presence.user_id}`"
+                    :ref="el => setVideoRef(el, presence.user_id)"
+                    autoplay
+                    playsinline
+                    class="hidden-audio"
+                    muted="false"
+                ></audio>
                 
                 <!-- User Avatars -->
                 <div
@@ -1322,18 +1336,30 @@ export default {
                 window.Echo.private && 
                 !window.Echo._isMock;
             
-            // Listen for WebRTC events
+            // Listen for WebRTC events (using public channel since API already authenticates)
             if (isEchoConfigured) {
                 try {
-                    const channel = window.Echo.private(`user.${currentUserId.value}`);
+                    // Use public channel - API endpoint already authenticates the sender
+                    const channel = window.Echo.channel(`user.${currentUserId.value}`);
                     if (channel && channel.listen) {
-                        channel.listen('.webrtc.offer', (data) => handleOffer(data));
-                        channel.listen('.webrtc.answer', (data) => handleAnswer(data));
-                        channel.listen('.webrtc.ice-candidate', (data) => handleIceCandidate(data));
-                        console.log('✅ WebRTC listeners set up');
+                        channel.listen('.webrtc.offer', (data) => {
+                            console.log('📥 WebRTC offer event received:', data);
+                            handleOffer(data);
+                        });
+                        channel.listen('.webrtc.answer', (data) => {
+                            console.log('📥 WebRTC answer event received:', data);
+                            handleAnswer(data);
+                        });
+                        channel.listen('.webrtc.ice-candidate', (data) => {
+                            console.log('📥 WebRTC ICE candidate event received:', data);
+                            handleIceCandidate(data);
+                        });
+                        console.log('✅ WebRTC listeners set up on channel: user.' + currentUserId.value);
+                    } else {
+                        console.error('❌ Failed to get channel for WebRTC listeners');
                     }
                 } catch (error) {
-                    console.error('Failed to setup WebRTC listeners:', error);
+                    console.error('❌ Failed to setup WebRTC listeners:', error);
                 }
             } else {
                 console.warn('⚠️ Echo not configured - WebRTC signaling will not work. Audio/video communication requires Pusher configuration.');
@@ -1440,7 +1466,7 @@ export default {
                 // Ensure iceServers is properly formatted
                 const peerConfig = {
                     initiator,
-                    trickle: false,
+                    trickle: false, // Set to false to get complete SDP immediately
                     stream: localStream.value || undefined,
                     config: {
                         iceServers: (iceServers && iceServers.length > 0) ? iceServers : [
@@ -1450,7 +1476,19 @@ export default {
                 };
                 
                 console.log('Creating peer with stream:', localStream.value ? 'has stream' : 'no stream', 'audio tracks:', localStream.value?.getAudioTracks().length || 0);
+                console.log('Peer config:', { initiator, hasStream: !!localStream.value, iceServers: peerConfig.config.iceServers.length, trickle: peerConfig.trickle });
+                
+                // Create peer instance
                 const peer = new SimplePeer(peerConfig);
+                console.log('✅ SimplePeer instance created for user:', userId);
+                
+                // Store peer immediately
+                peers.value[userId] = peer;
+                console.log('✅ Peer stored in peers object for user:', userId);
+                
+                // IMPORTANT: Attach signal handler IMMEDIATELY after creating peer
+                // With trickle: false, signal is generated synchronously during construction
+                // So we need to attach the handler right away
                 
                 // If stream is added later, add tracks to this peer
                 if (!localStream.value) {
@@ -1476,13 +1514,100 @@ export default {
                     setTimeout(() => clearInterval(checkStream), 10000);
                 }
 
+                // Set up signal handler - this MUST be set up before signal is generated
+                // With trickle: false, signal is generated immediately
                 peer.on('signal', (data) => {
-
+                    const signalType = initiator ? 'offer' : 'answer';
+                    console.log('📶 WebRTC signal generated for user:', userId, 'type:', signalType);
+                    console.log('   Signal data length:', JSON.stringify(data).length, 'bytes');
+                    console.log('   Signal keys:', Object.keys(data));
+                    
+                    // Check if Echo is configured before sending (using channel, not private)
+                    const isEchoConfigured = window.Echo && 
+                        window.Echo.channel && 
+                        !window.Echo._isMock;
+                    
+                    if (!isEchoConfigured) {
+                        console.error('❌ Cannot send WebRTC signal - Echo not configured! WebSocket connection required.');
+                        console.error('   Echo object:', window.Echo);
+                        console.error('   Echo.channel:', window.Echo?.channel);
+                        console.error('   Echo._isMock:', window.Echo?._isMock);
+                        return;
+                    }
+                    
+                    console.log('📤 Sending WebRTC', signalType, 'to user:', userId);
                     if (initiator) {
                         sendOffer(userId, JSON.stringify(data));
                     } else {
                         sendAnswer(userId, JSON.stringify(data));
                     }
+                });
+                console.log('✅ Signal handler attached to peer for user:', userId, 'initiator:', initiator);
+                
+                // For initiator peers with trickle: false, signal should be generated immediately
+                // But SimplePeer might generate it asynchronously, so check multiple times
+                if (initiator) {
+                    // Check immediately
+                    setTimeout(() => {
+                        if (peer._pc && peer._pc.localDescription && peer._pc.localDescription.type === 'offer') {
+                            console.log('🔄 Found existing offer, manually triggering signal event');
+                            const signalData = {
+                                type: 'offer',
+                                sdp: peer._pc.localDescription.sdp
+                            };
+                            peer.emit('signal', signalData);
+                        } else {
+                            console.log('⚠️ No offer found yet, peer state:', {
+                                hasPC: !!peer._pc,
+                                localDescription: peer._pc?.localDescription?.type,
+                                signalingState: peer._pc?.signalingState,
+                                connectionState: peer._pc?.connectionState
+                            });
+                        }
+                    }, 50);
+                    
+                    // Check again after a longer delay
+                    setTimeout(() => {
+                        if (peer._pc && peer._pc.localDescription && peer._pc.localDescription.type === 'offer') {
+                            console.log('🔄 Retry: Found offer, manually triggering signal event');
+                            const signalData = {
+                                type: 'offer',
+                                sdp: peer._pc.localDescription.sdp
+                            };
+                            peer.emit('signal', signalData);
+                        } else {
+                            console.warn('⚠️ Still no offer after delay. Peer may need manual trigger.');
+                            // Try to manually create offer if peer is ready
+                            if (peer._pc && peer._pc.signalingState === 'stable') {
+                                console.log('🔄 Attempting to manually create offer...');
+                                peer._pc.createOffer().then(offer => {
+                                    console.log('✅ Created offer manually:', offer.type);
+                                    peer._pc.setLocalDescription(offer).then(() => {
+                                        const signalData = {
+                                            type: 'offer',
+                                            sdp: offer.sdp
+                                        };
+                                        peer.emit('signal', signalData);
+                                    }).catch(err => console.error('Error setting local description:', err));
+                                }).catch(err => console.error('Error creating offer:', err));
+                            }
+                        }
+                    }, 500);
+                }
+
+                // Handle connection errors
+                peer.on('error', (err) => {
+                    console.error('❌ WebRTC peer error for user:', userId, err);
+                });
+
+                // Handle connection close
+                peer.on('close', () => {
+                    console.log('🔌 WebRTC connection closed for user:', userId);
+                });
+
+                // Handle connection open
+                peer.on('connect', () => {
+                    console.log('✅ WebRTC connection established with user:', userId);
                 });
 
                 peer.on('stream', (stream) => {
@@ -1565,11 +1690,25 @@ export default {
                 });
 
                 peer.on('error', (err) => {
-                    
-                    // Don't crash on peer errors - just log them
+                    console.error('❌ WebRTC peer error for user:', userId, err);
+                    console.error('   Error details:', err.message, err.stack);
                 });
 
-                peers.value[userId] = peer;
+                // Peer is already stored above, just confirm
+                if (peers.value[userId] === peer) {
+                    console.log('✅ Peer confirmed in peers object for user:', userId);
+                } else {
+                    console.warn('⚠️ Peer not found in peers object, storing again');
+                    peers.value[userId] = peer;
+                }
+                
+                // Log peer state
+                console.log('📊 Peer state for user:', userId, {
+                    initiator: peer.initiator,
+                    destroyed: peer.destroyed,
+                    connected: peer.connected,
+                    hasStream: !!localStream.value
+                });
 
             } catch (peerError) {
                 
@@ -1631,19 +1770,21 @@ export default {
 
         const sendOffer = async (userId, offer) => {
             try {
-                await axios.post(`/api/webrtc/rooms/${props.roomId}/offer`, {
+                console.log('📤 Sending WebRTC offer to user:', userId);
+                const response = await axios.post(`/api/webrtc/rooms/${props.roomId}/offer`, {
                     target_user_id: userId,
                     offer: offer,
                 });
+                console.log('✅ WebRTC offer sent successfully to user:', userId);
             } catch (error) {
-                
+                console.error('❌ Failed to send WebRTC offer to user:', userId, error);
             }
         };
 
         const sendAnswer = async (userId, answer) => {
             try {
                 console.log('📤 Sending WebRTC answer to user:', userId);
-                await axios.post(`/api/webrtc/rooms/${props.roomId}/answer`, {
+                const response = await axios.post(`/api/webrtc/rooms/${props.roomId}/answer`, {
                     target_user_id: userId,
                     answer: answer,
                 });
@@ -1654,23 +1795,48 @@ export default {
         };
 
         const handleOffer = async (data) => {
+            console.log('📥 WebRTC offer received from user:', data.from_user_id);
             if (!peers.value[data.from_user_id]) {
+                console.log('Creating peer for incoming offer from user:', data.from_user_id);
                 await createPeer(data.from_user_id, false);
             }
             if (peers.value[data.from_user_id]) {
-                peers.value[data.from_user_id].signal(JSON.parse(data.offer));
+                try {
+                    peers.value[data.from_user_id].signal(JSON.parse(data.offer));
+                    console.log('✅ Processed WebRTC offer from user:', data.from_user_id);
+                } catch (error) {
+                    console.error('❌ Error processing offer:', error);
+                }
+            } else {
+                console.error('❌ Failed to create peer for offer from user:', data.from_user_id);
             }
         };
 
         const handleAnswer = (data) => {
+            console.log('📥 WebRTC answer received from user:', data.from_user_id);
             if (peers.value[data.from_user_id]) {
-                peers.value[data.from_user_id].signal(JSON.parse(data.answer));
+                try {
+                    peers.value[data.from_user_id].signal(JSON.parse(data.answer));
+                    console.log('✅ Processed WebRTC answer from user:', data.from_user_id);
+                } catch (error) {
+                    console.error('❌ Error processing answer:', error);
+                }
+            } else {
+                console.error('❌ No peer connection found for answer from user:', data.from_user_id);
             }
         };
 
         const handleIceCandidate = (data) => {
+            console.log('🧊 WebRTC ICE candidate received from user:', data.from_user_id);
             if (peers.value[data.from_user_id]) {
-                peers.value[data.from_user_id].signal(JSON.parse(data.candidate));
+                try {
+                    peers.value[data.from_user_id].signal(JSON.parse(data.candidate));
+                    console.log('✅ Processed ICE candidate from user:', data.from_user_id);
+                } catch (error) {
+                    console.error('❌ Error processing ICE candidate:', error);
+                }
+            } else {
+                console.warn('⚠️ No peer connection found for ICE candidate from user:', data.from_user_id);
             }
         };
 
@@ -2094,6 +2260,41 @@ export default {
         };
 
         const handlePanEnd = () => {
+            isPanning.value = false;
+        };
+
+        // Touch event handlers for mobile
+        const handleTouchStart = (event) => {
+            if (event.touches.length === 1) {
+                const touch = event.touches[0];
+                const target = event.target;
+                const isInteractiveElement = target.closest('.user-avatar') || 
+                                            target.closest('.user-controls') ||
+                                            target.closest('button') ||
+                                            target.closest('input') ||
+                                            target.closest('video');
+                
+                if (!isInteractiveElement && (target === canvasRef.value || target.classList.contains('workspace-grid'))) {
+                    event.preventDefault();
+                    isPanning.value = true;
+                    panStart.value = {
+                        x: touch.clientX - panX.value,
+                        y: touch.clientY - panY.value
+                    };
+                }
+            }
+        };
+
+        const handleTouchMove = (event) => {
+            if (isPanning.value && event.touches.length === 1 && !isDragging.value) {
+                event.preventDefault();
+                const touch = event.touches[0];
+                panX.value = touch.clientX - panStart.value.x;
+                panY.value = touch.clientY - panStart.value.y;
+            }
+        };
+
+        const handleTouchEnd = () => {
             isPanning.value = false;
         };
 
@@ -2528,6 +2729,10 @@ export default {
             }
         };
 
+        const goBackToRooms = () => {
+            window.location.href = '/rooms';
+        };
+
         const leaveRoom = async () => {
             try {
                 await axios.post(`/api/virtual-office/rooms/${props.roomId}/leave`);
@@ -2638,18 +2843,9 @@ export default {
                     if (channel && channel.listen) {
                         console.log('✅ Echo channel ready, setting up listeners');
                         
-                        // Test connection
-                        channel.here((users) => {
-                            console.log('✅ Connected to WebSocket channel, users online:', users.length);
-                        });
-                        
-                        channel.joining((user) => {
-                            console.log('👋 User joining:', user);
-                        });
-                        
-                        channel.leaving((user) => {
-                            console.log('👋 User leaving:', user);
-                        });
+                        // Note: .here(), .joining(), .leaving() are for presence channels only
+                        // We're using private channels with events, so these methods don't exist
+                        console.log('✅ Connected to WebSocket channel');
                         channel.listen('.user.joined', async (data) => {
                             console.log('User joined:', data.presence.user_id, 'video_enabled:', data.presence.video_enabled);
                             const existingIndex = presences.value.findIndex(p => p.user_id === data.presence.user_id);
@@ -3108,6 +3304,9 @@ export default {
             handlePanStart,
             handlePanMove,
             handlePanEnd,
+            handleTouchStart,
+            handleTouchMove,
+            handleTouchEnd,
             handleMouseDown,
             handleMouseMove,
             handleMouseUp,
@@ -4206,6 +4405,303 @@ export default {
 .btn-icon {
     font-size: 1rem;
     display: inline-block;
+}
+
+/* ============================================
+   MOBILE RESPONSIVE STYLES
+   ============================================ */
+
+@media (max-width: 768px) {
+    .virtual-office-container {
+        height: 100vh;
+        height: 100dvh; /* Dynamic viewport height for mobile */
+    }
+
+    .office-header {
+        flex-direction: column;
+        gap: 1rem;
+        padding: 1rem;
+    }
+
+    .office-header h1 {
+        font-size: 1.2rem;
+        text-align: center;
+    }
+
+    .header-controls {
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 0.5rem;
+    }
+
+    .control-btn {
+        padding: 0.5rem 0.75rem;
+        font-size: 0.875rem;
+        min-width: auto;
+    }
+
+    .office-canvas-wrapper {
+        touch-action: pan-x pan-y pinch-zoom;
+    }
+
+    .user-avatar {
+        min-width: 60px;
+        min-height: 60px;
+    }
+
+    .avatar-circle {
+        width: 50px;
+        height: 50px;
+        font-size: 1.2rem;
+        border-width: 3px;
+    }
+
+    .user-info {
+        min-width: 100px;
+        padding: 0.4rem 0.6rem;
+        font-size: 0.75rem;
+    }
+
+    .user-name {
+        font-size: 0.75rem;
+    }
+
+    .user-position,
+    .user-department {
+        font-size: 0.65rem;
+    }
+
+    .user-controls {
+        bottom: -40px;
+        gap: 0.2rem;
+        padding: 0.4rem;
+    }
+
+    .user-control-btn {
+        width: 32px;
+        height: 32px;
+        font-size: 0.875rem;
+    }
+
+    .video-panel {
+        width: 100% !important;
+        max-width: 100% !important;
+        height: 50vh !important;
+        max-height: 50vh !important;
+        left: 0 !important;
+        right: 0 !important;
+        top: auto !important;
+        bottom: 0 !important;
+        border-radius: 1rem 1rem 0 0;
+        position: fixed;
+    }
+
+    .video-panel-header {
+        padding: 0.75rem;
+    }
+
+    .video-panel-header h3 {
+        font-size: 1rem;
+    }
+
+    .video-panel-content {
+        min-height: 300px;
+        padding: 0.75rem;
+    }
+
+    .video-panel-item {
+        min-height: 250px;
+    }
+
+    .video-panel-video {
+        min-height: 250px;
+    }
+
+    .video-panel-content.multi-user {
+        grid-template-columns: 1fr;
+    }
+
+    .chat-panel {
+        width: 100% !important;
+        max-width: 100% !important;
+        height: 50vh !important;
+        max-height: 50vh !important;
+        right: 0 !important;
+        left: 0 !important;
+        top: auto !important;
+        bottom: 0 !important;
+        border-radius: 1rem 1rem 0 0;
+    }
+
+    .settings-modal,
+    .background-modal {
+        padding: 1rem;
+    }
+
+    .settings-content,
+    .background-modal-content {
+        width: 95%;
+        max-width: 95%;
+        padding: 1rem;
+    }
+
+    .office-canvas {
+        width: 3000px;
+        height: 2000px;
+    }
+
+    .status-indicator {
+        width: 14px;
+        height: 14px;
+        top: -1px;
+        right: -1px;
+    }
+
+    .status-indicator .status-icon {
+        width: 8px;
+        height: 8px;
+    }
+
+    .audio-muted-icon,
+    .video-off-icon {
+        font-size: 0.75rem;
+        padding: 3px;
+    }
+}
+
+@media (max-width: 480px) {
+    .office-header {
+        padding: 0.75rem;
+    }
+
+    .office-header h1 {
+        font-size: 1rem;
+    }
+
+    .control-btn {
+        padding: 0.4rem 0.6rem;
+        font-size: 0.75rem;
+    }
+
+    .avatar-circle {
+        width: 45px;
+        height: 45px;
+        font-size: 1rem;
+    }
+
+    .user-info {
+        min-width: 90px;
+        padding: 0.3rem 0.5rem;
+    }
+
+    .user-name {
+        font-size: 0.7rem;
+    }
+
+    .user-position,
+    .user-department {
+        font-size: 0.6rem;
+    }
+
+    .user-control-btn {
+        width: 28px;
+        height: 28px;
+        font-size: 0.75rem;
+    }
+
+    .video-panel {
+        height: 40vh !important;
+        max-height: 40vh !important;
+    }
+
+    .video-panel-content {
+        min-height: 200px;
+        padding: 0.5rem;
+    }
+
+    .video-panel-item {
+        min-height: 200px;
+    }
+
+    .video-panel-video {
+        min-height: 200px;
+    }
+
+    .chat-panel {
+        height: 40vh !important;
+        max-height: 40vh !important;
+    }
+}
+
+/* Touch device optimizations */
+@media (hover: none) and (pointer: coarse) {
+    .user-avatar:hover {
+        transform: none;
+    }
+
+    .user-avatar:hover .user-controls {
+        opacity: 1;
+    }
+
+    .user-controls {
+        opacity: 1;
+    }
+
+    .control-btn:hover {
+        background: #3a3a3a;
+    }
+
+    .control-btn.active:hover {
+        background: #4a90e2;
+    }
+
+    /* Larger touch targets */
+    .user-control-btn {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    .control-btn {
+        min-height: 44px;
+    }
+}
+
+/* Landscape mobile */
+@media (max-width: 900px) and (orientation: landscape) {
+    .video-panel {
+        height: 60vh !important;
+        max-height: 60vh !important;
+    }
+
+    .chat-panel {
+        height: 60vh !important;
+        max-height: 60vh !important;
+    }
+
+    .office-header {
+        padding: 0.5rem 1rem;
+    }
+
+    .header-controls {
+        gap: 0.4rem;
+    }
+
+    .control-btn {
+        padding: 0.4rem 0.6rem;
+        font-size: 0.8rem;
+    }
+}
+
+/* Prevent text selection on mobile during drag */
+@media (max-width: 768px) {
+    .office-canvas-wrapper,
+    .user-avatar {
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        -moz-user-select: none;
+        -ms-user-select: none;
+        user-select: none;
+    }
 }
 </style>
 
