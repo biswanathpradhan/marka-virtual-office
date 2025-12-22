@@ -1,0 +1,62 @@
+.room-manager-modal {
+  max-width: 700px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.room-manager-content {
+  padding: 20px 0;
+}
+
+.room-manager-actions {
+  margin-bottom: 20px;
+}
+
+.room-item {
+  cursor: pointer;
+}
+
+.room-item.active {
+  border-color: #3498db;
+  background: #e3f2fd;
+}
+
+.room-item.active h4 {
+  color: #3498db;
+}
+
+.create-room-form {
+  background: #f5f5f5;
+  padding: 20px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+.form-group {
+  margin-bottom: 15px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 5px;
+  font-weight: 600;
+  color: #333;
+}
+
+.form-group .input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.form-group textarea.input {
+  min-height: 80px;
+  resize: vertical;
+}
+
+.form-group select.input {
+  cursor: pointer;
+}
+
